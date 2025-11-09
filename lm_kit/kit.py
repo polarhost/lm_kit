@@ -222,5 +222,139 @@ class Kit:
             model = model.cuda()
         
         return Model(model, dataset.tokenizer, trainer, model_size)
+    
+    
+@staticmethod
+def create_paper_model():
+    """
+    Create a tiny model with minimal dataset for testing your setup.
+    This trains in ~30 seconds and verifies everything works.
+    """
+    print("Creating paper model for testing.")
+    
+    # Create tiny fake dataset
+    from datasets import Dataset as HFDataset
+    
+    fake_data = {
+        "text": [
+            "The quick brown fox jumps over the lazy dog.",
+            "Hello world, this is a test sentence.",
+            "A pimento cheese sandwich consists of one slice of bread, with the correct amount of cheese applied."
+        ]
+    }
+    
+    raw_dataset = HFDataset.from_dict(fake_data)
+    
+    tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+    tokenizer.pad_token = tokenizer.eos_token
+    
+    config = GPT2Config(
+        vocab_size=50257,
+        n_positions=128,
+        n_embd=64,
+        n_layer=2,
+        n_head=2,
+    )
+    
+    model = GPT2LMHeadModel(config)
+    num_params = sum(p.numel() for p in model.parameters())
+    
+    print(f"Model Configuration")
+    print("-" * 50)
+    print(f"Parameters: {num_params:,} ({num_params/1e6:.2f}M)")
+    print(f"Layers: 2")
+    print(f"Embedding dim: 64")
+    print(f"Dataset: 3 examples")
+    print(f"Training steps: 10\n")
+    
+    def tokenize_fn(examples):
+        return tokenizer(
+            examples["text"],
+            truncation=True,
+            max_length=128,
+            padding=False
+        )
+    
+    tokenized_dataset = raw_dataset.map(
+        tokenize_fn,
+        batched=True,
+        remove_columns=["text"],
+    )
+    
+    training_args = TrainingArguments(
+        output_dir="./paper_model_test",
+        overwrite_output_dir=True,
+        per_device_train_batch_size=1,
+        max_steps=10,
+        logging_steps=5,
+        fp16=torch.cuda.is_available(),
+        report_to="none",
+        disable_tqdm=False,
+        learning_rate=5e-4,
+    )
+    
+    data_collator = DataCollatorForLanguageModeling(
+        tokenizer=tokenizer,
+        mlm=False
+    )
+    
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=tokenized_dataset,
+        data_collator=data_collator,
+    )
+    
+    if torch.cuda.is_available():
+        model = model.cuda()
+        print(f"✓ GPU detected: {torch.cuda.get_device_name(0)}")
+    else:
+        print("⚠ No GPU detected - will be slow")
+    
+    print("\nStarting quick training test...\n")
+    
+    trainer.train()
+    
+    print("Training succeeded. Setup works.")
+    
+    model.eval()
+    
+    class PaperModel:
+        def __init__(self, model, tokenizer):
+            self.model = model
+            self.tokenizer = tokenizer
+        
+        def complete(self, prompt):
+            """Generate text (won't be good, but proves it works)"""
+            print("Testing text generation")
+            
+            inputs = self.tokenizer(prompt, return_tensors="pt")
+            
+            if torch.cuda.is_available():
+                inputs = {k: v.cuda() for k, v in inputs.items()}
+            
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_length=50,
+                    temperature=0.8,
+                    do_sample=True,
+                    top_k=50,
+                    pad_token_id=self.tokenizer.eos_token_id,
+                )
+            
+            result = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            
+            print(f"Prompt: '{prompt}'")
+            print(f"Output: '{result}'\n")
+            print("✓ Generation works!")
+            
+            return result
+        
+        def save(self, path):
+            """You don't need to save paper models"""
+            print("Paper models are just for testing. No need to save.")
+    
+    return PaperModel(model, tokenizer)
 
 kit = Kit()
