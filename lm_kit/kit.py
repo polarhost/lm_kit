@@ -113,7 +113,7 @@ class Model:
         print(f"Model saved to {path}")
 
 
-class Kit:
+class kit:
     """Main kit object with all methods"""
     
     @staticmethod
@@ -354,4 +354,4 @@ def create_paper_model():
     
     return PaperModel(model, tokenizer)
 
-kit = Kit()
+kit = kit()
