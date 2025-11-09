@@ -13,16 +13,18 @@ def _train_custom_tokenizer(dataset, vocab_size=16384):
     Train a custom BPE tokenizer on the dataset.
     Uses the same algorithm as GPT-2 for compatibility.
     """
-    from tokenizers import Tokenizer, models, trainers, pre_tokenizers
-    from tokenizers.processors import TemplateProcessing
+    from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
     from transformers import PreTrainedTokenizerFast
     
     print(f"Training custom BPE tokenizer ({vocab_size:,} tokens)...")
     print("This may take 1-2 minutes.\n")
     
     tokenizer = Tokenizer(models.BPE())
-    
+
     tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+
+    # CRITICAL: Add ByteLevel decoder to properly decode byte-level tokens back to text
+    tokenizer.decoder = decoders.ByteLevel()
     
     trainer = trainers.BpeTrainer(
         vocab_size=vocab_size,
@@ -37,12 +39,11 @@ def _train_custom_tokenizer(dataset, vocab_size=16384):
             yield item['text']
     
     tokenizer.train_from_iterator(text_iterator(), trainer=trainer)
-    
-    # Add post-processing for special tokens (like GPT-2)
-    tokenizer.post_processor = TemplateProcessing(
-        single="$A <|endoftext|>",
-        special_tokens=[("<|endoftext|>", tokenizer.token_to_id("<|endoftext|>"))],
-    )
+
+    # Note: Unlike the GPT-2 tokenizer, we don't add a post-processor that automatically
+    # appends <|endoftext|> to every sequence. The DataCollatorForLanguageModeling
+    # handles special token placement during training, and explicit control during inference
+    # is better than automatic appending.
     
     # Wrap in HuggingFace PreTrainedTokenizerFast for compatibility
     wrapped_tokenizer = PreTrainedTokenizerFast(
