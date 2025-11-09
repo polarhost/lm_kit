@@ -1,12 +1,12 @@
 import torch
 from datasets import load_dataset as hf_load_dataset
+from datasets import Dataset as HFDataset
 from transformers import (
     GPT2Config, GPT2LMHeadModel, GPT2Tokenizer,
     Trainer, TrainingArguments, DataCollatorForLanguageModeling
 )
 from .configs import MODEL_PRESETS, BATCH_CONFIGS
 from .utils import detect_gpu, suggest_context_length, estimate_total_tokens, calculate_training_steps
-
 
 class Dataset:
     """Wrapper around HuggingFace dataset with analysis"""
@@ -231,9 +231,6 @@ def create_paper_model():
     This trains in ~30 seconds and verifies everything works.
     """
     print("Creating paper model for testing.")
-    
-    # Create tiny fake dataset
-    from datasets import Dataset as HFDataset
     
     fake_data = {
         "text": [
