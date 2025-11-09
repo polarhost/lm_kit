@@ -8,6 +8,55 @@ from transformers import (
 from .configs import MODEL_PRESETS, BATCH_CONFIGS
 from .utils import detect_gpu, suggest_context_length, estimate_total_tokens, calculate_training_steps
 
+def _train_custom_tokenizer(dataset, vocab_size=16384):
+    """
+    Train a custom BPE tokenizer on the dataset.
+    Uses the same algorithm as GPT-2 for compatibility.
+    """
+    from tokenizers import Tokenizer, models, trainers, pre_tokenizers
+    from tokenizers.processors import TemplateProcessing
+    from transformers import PreTrainedTokenizerFast
+    
+    print(f"Training custom BPE tokenizer ({vocab_size:,} tokens)...")
+    print("This may take 1-2 minutes.\n")
+    
+    tokenizer = Tokenizer(models.BPE())
+    
+    tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    
+    trainer = trainers.BpeTrainer(
+        vocab_size=vocab_size,
+        special_tokens=["<|endoftext|>"],
+        show_progress=True,
+        min_frequency=2,
+    )
+    
+    # Train on the dataset
+    def text_iterator():
+        for item in dataset:
+            yield item['text']
+    
+    tokenizer.train_from_iterator(text_iterator(), trainer=trainer)
+    
+    # Add post-processing for special tokens (like GPT-2)
+    tokenizer.post_processor = TemplateProcessing(
+        single="$A <|endoftext|>",
+        special_tokens=[("<|endoftext|>", tokenizer.token_to_id("<|endoftext|>"))],
+    )
+    
+    # Wrap in HuggingFace PreTrainedTokenizerFast for compatibility
+    wrapped_tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=tokenizer,
+        eos_token="<|endoftext|>",
+        bos_token="<|endoftext|>",
+        unk_token="<|endoftext|>",
+        pad_token="<|endoftext|>",
+    )
+    
+    print("Tokenizer training complete!\n")
+    return wrapped_tokenizer
+
+
 class Dataset:
     """Wrapper around HuggingFace dataset with analysis"""
     
@@ -19,6 +68,9 @@ class Dataset:
         
     def analyze(self):
         """Analyze dataset and print stats"""
+        if self.tokenizer is None:
+            raise ValueError("Tokenizer not set yet. This will be set when you call kit.create_model()")
+            
         print("Analyzing dataset...")
         
         # Get stats
@@ -113,11 +165,69 @@ class Model:
         print(f"Model saved to {path}")
 
 
-class kit:
+class Kit:
     """Main kit object with all methods"""
     
-    @staticmethod
-    def get_dataset(source, name, split):
+    def __init__(self):
+        self.tokenizer_mode = "standard"  # Default
+    
+    def set_tokenizer(self, mode="standard"):
+        """
+        Set tokenizer size for future models.
+        
+        Args:
+            mode: "standard" (50K vocab) or "efficient" (16K vocab, trained on your data)
+        """
+        valid_modes = ["standard", "efficient"]
+        if mode not in valid_modes:
+            raise ValueError(f"mode must be one of {valid_modes}")
+        
+        self.tokenizer_mode = mode
+        
+        print(f"\nTokenizer mode set to: '{mode}'")
+        print("-" * 50)
+        
+        if mode == "standard":
+            print("Vocabulary: 50,257 tokens (GPT-2)")
+            print("Impact on 10M model: ~13M params in embeddings (56%)")
+            print("Impact on 30M model: ~19M params in embeddings (47%)")
+            print("Impact on 100M model: ~26M params in embeddings (26%)")
+            print("\nBest for: General use, broad vocabulary needs")
+            
+        elif mode == "efficient":
+            print("Vocabulary: 16,384 tokens (custom trained)")
+            print("Impact on 10M model: ~4M params in embeddings (29%)")
+            print("Impact on 30M model: ~6M params in embeddings (20%)")
+            print("Impact on 100M model: ~8M params in embeddings (8%)")
+            print("\nNote: Tokenizer will be trained on your dataset (1-2 min)")
+            print("Best for: Smaller models, domain-specific text")
+        
+        print()
+        return self
+    
+    def _get_tokenizer(self, dataset=None):
+        """Internal method to get the appropriate tokenizer"""
+        
+        if self.tokenizer_mode == "standard":
+            # Use pretrained GPT-2 tokenizer
+            tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+            tokenizer.pad_token = tokenizer.eos_token
+            vocab_size = 50257
+            
+        elif self.tokenizer_mode == "efficient":
+            # Train custom tokenizer
+            if dataset is None:
+                raise ValueError(
+                    "Dataset required for 'efficient' tokenizer mode. "
+                    "Call kit.get_dataset() first."
+                )
+            
+            tokenizer = _train_custom_tokenizer(dataset, vocab_size=16384)
+            vocab_size = 16384
+        
+        return tokenizer, vocab_size
+    
+    def get_dataset(self, source, name, split):
         """Load dataset from HuggingFace"""
         if source != "hugging_face":
             raise ValueError("Only 'hugging_face' source supported for now")
@@ -131,38 +241,47 @@ class kit:
         
         print(f"Loaded {len(raw_dataset):,} examples\n")
         
-        # Load tokenizer
-        tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-        tokenizer.pad_token = tokenizer.eos_token
-        
-        return Dataset(raw_dataset, tokenizer)
+        return Dataset(raw_dataset, tokenizer=None)
     
-    @staticmethod
-    def create_model(dataset, model_size="30M"):
+    def create_model(self, dataset, model_size="30M"):
         """Create and configure model for training"""
         
         if model_size not in MODEL_PRESETS:
             raise ValueError(f"model_size must be one of: {list(MODEL_PRESETS.keys())}")
         
+        # Get the appropriate tokenizer based on mode
+        tokenizer, vocab_size = self._get_tokenizer(dataset.raw)
+        
+        # Assign tokenizer to dataset
+        dataset.tokenizer = tokenizer
+        
         # Analyze dataset if not done yet
         if dataset.context_length is None:
             dataset.analyze()
         
-        # Get model config
+        # Get model config and use the selected vocab size
         config_dict = MODEL_PRESETS[model_size].copy()
+        config_dict['vocab_size'] = vocab_size
         config_dict['n_positions'] = dataset.context_length
         
         config = GPT2Config(**config_dict)
         model = GPT2LMHeadModel(config)
         
         num_params = sum(p.numel() for p in model.parameters())
+        vocab_params = vocab_size * config_dict['n_embd']
+        model_params = num_params - (vocab_params * 2)
+        
         print(f"Creating {model_size} model")
         print("-" * 50)
-        print(f"Parameters: {num_params:,} ({num_params/1e6:.1f}M)")
-        print(f"Layers: {config.n_layer}")
-        print(f"Embedding dim: {config.n_embd}")
-        print(f"Attention heads: {config.n_head}")
-        print(f"Context length: {config.n_positions}\n")
+        print(f"Total parameters: {num_params:,} ({num_params/1e6:.1f}M)")
+        print(f"  Vocabulary: {vocab_params*2:,} ({vocab_params*2/1e6:.1f}M)")
+        print(f"  Model layers: {model_params:,} ({model_params/1e6:.1f}M)")
+        print(f"Architecture:")
+        print(f"  Layers: {config.n_layer}")
+        print(f"  Embedding dim: {config.n_embd}")
+        print(f"  Attention heads: {config.n_head}")
+        print(f"  Context length: {config.n_positions}")
+        print(f"  Vocabulary size: {vocab_size:,}\n")
         
         # Get GPU-specific batch config
         gpu = detect_gpu()
@@ -207,7 +326,7 @@ class kit:
         )
         
         data_collator = DataCollatorForLanguageModeling(
-            tokenizer=dataset.tokenizer,
+            tokenizer=tokenizer,
             mlm=False
         )
         
@@ -221,22 +340,19 @@ class kit:
         if torch.cuda.is_available():
             model = model.cuda()
         
-        return Model(model, dataset.tokenizer, trainer, model_size)
+        return Model(model, tokenizer, trainer, model_size)
     
-    
-    @staticmethod
-    def create_paper_model():
+    def create_paper_model(self):
         """
         Create a tiny model with minimal dataset for testing your setup.
-        This trains in ~30 seconds and verifies everything works.
         """
-        print("Creating paper model for testing.")
+        print("Creating tiny paper model for testing.")
         
         fake_data = {
             "text": [
                 "The quick brown fox jumps over the lazy dog.",
                 "Hello world, this is a test sentence.",
-                "A pimento cheese sandwich consists of one slice of bread, with the correct amount of cheese applied."
+                "Machine learning is fascinating and fun."
             ]
         }
         
@@ -308,11 +424,11 @@ class kit:
         else:
             print("⚠ No GPU detected - will be slow")
         
-        print("\nStarting quick training test...\n")
+        print("\nStarting training test...\n")
         
         trainer.train()
         
-        print("Training succeeded. Setup works.")
+        print("Training completed. Setup works properly.")
         
         model.eval()
         
@@ -322,8 +438,8 @@ class kit:
                 self.tokenizer = tokenizer
             
             def complete(self, prompt):
-                """Generate text (won't be good, but proves it works)"""
-                print("Testing text generation")
+                """Generate text"""
+                print("Testing text completion:")
                 
                 inputs = self.tokenizer(prompt, return_tensors="pt")
                 
@@ -344,7 +460,7 @@ class kit:
                 
                 print(f"Prompt: '{prompt}'")
                 print(f"Output: '{result}'\n")
-                print("✓ Generation works!")
+                print("Generation works!")
                 
                 return result
             
@@ -354,4 +470,4 @@ class kit:
         
         return PaperModel(model, tokenizer)
 
-kit = kit()
+kit = Kit()
