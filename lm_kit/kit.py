@@ -243,7 +243,7 @@ class Kit:
         
         return Dataset(raw_dataset, tokenizer=None)
     
-    def create_model(self, dataset, model_size="30M"):
+    def create_model(self, dataset, model_size="30M", steps=0):
         """Create and configure model for training"""
         
         if model_size not in MODEL_PRESETS:
@@ -288,7 +288,7 @@ class Kit:
         batch_config = BATCH_CONFIGS[gpu][model_size]
         
         # Calculate training steps
-        steps = calculate_training_steps(
+        steps = steps or calculate_training_steps(
             dataset.total_tokens,
             model_size,
             batch_config['batch_size'],
