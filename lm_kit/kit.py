@@ -176,9 +176,9 @@ class Kit:
         Set tokenizer size for future models.
         
         Args:
-            mode: "standard" (50K vocab) or "efficient" (16K vocab, trained on your data)
+            mode: "standard" (50K vocab) or "small" (16K vocab, trained on your data)
         """
-        valid_modes = ["standard", "efficient"]
+        valid_modes = ["standard", "small"]
         if mode not in valid_modes:
             raise ValueError(f"mode must be one of {valid_modes}")
         
@@ -194,7 +194,7 @@ class Kit:
             print("Impact on 100M model: ~26M params in embeddings (26%)")
             print("\nBest for: General use, broad vocabulary needs")
             
-        elif mode == "efficient":
+        elif mode == "small":
             print("Vocabulary: 16,384 tokens (custom trained)")
             print("Impact on 10M model: ~4M params in embeddings (29%)")
             print("Impact on 30M model: ~6M params in embeddings (20%)")
@@ -214,11 +214,11 @@ class Kit:
             tokenizer.pad_token = tokenizer.eos_token
             vocab_size = 50257
             
-        elif self.tokenizer_mode == "efficient":
+        elif self.tokenizer_mode == "small":
             # Train custom tokenizer
             if dataset is None:
                 raise ValueError(
-                    "Dataset required for 'efficient' tokenizer mode. "
+                    "Dataset required for 'small' tokenizer mode. "
                     "Call kit.get_dataset() first."
                 )
             
