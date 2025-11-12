@@ -23,7 +23,7 @@ def _train_custom_tokenizer(dataset, vocab_size=16384):
 
     tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
 
-    # CRITICAL: Add ByteLevel decoder to properly decode byte-level tokens back to text
+    # Add ByteLevel decoder to properly decode byte-level tokens back to text
     tokenizer.decoder = decoders.ByteLevel()
     
     trainer = trainers.BpeTrainer(
@@ -343,6 +343,90 @@ class Kit:
         
         return Model(model, tokenizer, trainer, model_size)
     
+    def load_model(self, path, model_size=None):
+        """
+        Load a pre-trained model from disk.
+
+        Args:
+            path: Path to the saved model directory
+            model_size: Optional model size ("10M", "30M", or "100M").
+                       If not provided, will be inferred from config.json
+
+        Returns:
+            Model instance ready for inference with complete() method
+        """
+        import os
+        from transformers import AutoTokenizer
+
+        # Validate path exists
+        if not os.path.exists(path):
+            raise ValueError(f"Model path does not exist: {path}")
+
+        print(f"Loading model from: {path}")
+        print("-" * 50)
+
+        # Load the model
+        try:
+            model = GPT2LMHeadModel.from_pretrained(path)
+            print("✓ Model loaded successfully")
+        except Exception as e:
+            raise ValueError(f"Failed to load model from {path}: {str(e)}")
+
+        # Load the tokenizer
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(path)
+            # Ensure pad_token is set (should be saved in config, but set as fallback)
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
+            print("✓ Tokenizer loaded successfully")
+        except Exception as e:
+            raise ValueError(f"Failed to load tokenizer from {path}: {str(e)}")
+
+        # Infer model size if not provided
+        if model_size is None:
+            # Try to infer from config
+            config = model.config
+            n_layer = config.n_layer
+            n_embd = config.n_embd
+
+            # Match against known presets
+            for size, preset in MODEL_PRESETS.items():
+                if preset['n_layer'] == n_layer and preset['n_embd'] == n_embd:
+                    model_size = size
+                    break
+
+            if model_size is None:
+                model_size = "custom"
+
+        # Get model info
+        num_params = sum(p.numel() for p in model.parameters())
+
+        print(f"\nModel Information")
+        print("-" * 50)
+        print(f"Model size: {model_size}")
+        print(f"Total parameters: {num_params:,} ({num_params/1e6:.1f}M)")
+        print(f"Architecture:")
+        print(f"  Layers: {model.config.n_layer}")
+        print(f"  Embedding dim: {model.config.n_embd}")
+        print(f"  Attention heads: {model.config.n_head}")
+        print(f"  Context length: {model.config.n_positions}")
+        print(f"  Vocabulary size: {model.config.vocab_size:,}")
+
+        # Move to GPU if available
+        if torch.cuda.is_available():
+            model = model.cuda()
+            print(f"\n✓ Model moved to GPU: {torch.cuda.get_device_name(0)}")
+        else:
+            print("\n⚠ No GPU detected - inference will be slower")
+
+        # Set to evaluation mode
+        model.eval()
+
+        print("\n✓ Model ready for inference\n")
+
+        # Return Model instance (trainer=None since we're not training)
+        return Model(model, tokenizer, trainer=None, model_size=model_size)
+
     def create_paper_model(self):
         """
         Create a tiny model with minimal dataset for testing your setup.
