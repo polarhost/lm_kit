@@ -145,7 +145,16 @@ class InstructionDataset:
                 desc="Tokenizing"
             )
 
-        print(f"✓ Tokenized {len(tokenized):,} examples\n")
+        print(f"✓ Tokenized {len(tokenized):,} examples")
+
+        # Show sample of what the data looks like
+        if len(tokenized) > 0:
+            sample_text = self.tokenizer.decode(tokenized[0]['input_ids'][:200])
+            print(f"\nSample tokenized text (first 200 tokens):")
+            print(f"---")
+            print(sample_text)
+            print(f"---\n")
+
         return tokenized
 
 
@@ -743,7 +752,8 @@ class Kit:
 
     def lora_tune(self, hf_model, dataset, lora_preset="medium", learning_rate=2e-4,
                   steps=1000, batch_size=4, gradient_accumulation_steps=4,
-                  max_length=512, output_dir="./lora_output", response_template=None):
+                  max_length=512, output_dir="./lora_output", response_template=None,
+                  use_simple_chat_template=True):
         """
         Configure LoRA fine-tuning for a HuggingFace model.
 
@@ -840,8 +850,29 @@ class Kit:
         print(f"\n✓ LoRA applied successfully")
         print(f"Actual trainable parameters: {trainable_params:,} ({100 * trainable_params / all_params:.2f}%)")
 
+        # Override chat template if requested
+        if use_simple_chat_template:
+            print(f"\n✓ Using simplified chat template (removes bloated system prompts)")
+            # Store original template
+            original_template = hf_model.tokenizer.chat_template
+
+            # Set a simple template that doesn't include the massive default system prompt
+            simple_template = (
+                "{% for message in messages %}"
+                "{% if message['role'] == 'system' %}"
+                "<|im_start|>system\n{{ message['content'] }}<|im_end|>\n"
+                "{% elif message['role'] == 'user' %}"
+                "<|im_start|>user\n{{ message['content'] }}<|im_end|>\n"
+                "{% elif message['role'] == 'assistant' %}"
+                "<|im_start|>assistant\n{{ message['content'] }}<|im_end|>\n"
+                "{% endif %}"
+                "{% endfor %}"
+            )
+            hf_model.tokenizer.chat_template = simple_template
+            print(f"  Original template had default system prompt - now using clean template\n")
+
         # Prepare dataset
-        print(f"\nPreparing dataset...")
+        print(f"Preparing dataset...")
         tokenized_dataset = dataset.prepare_for_training(hf_model.tokenizer, max_length=max_length)
 
         # Setup training arguments
