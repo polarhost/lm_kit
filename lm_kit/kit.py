@@ -924,9 +924,32 @@ class Kit:
                 )
 
             def __call__(self, features):
-                # Use standard data collator for padding
-                from transformers import default_data_collator
-                batch = default_data_collator(features)
+                # Pad sequences to the same length within the batch
+                import torch
+
+                # Find max length in this batch
+                max_length = max(len(f["input_ids"]) for f in features)
+
+                # Pad each feature to max_length
+                padded_input_ids = []
+                padded_attention_masks = []
+
+                for f in features:
+                    # Pad input_ids
+                    padding_length = max_length - len(f["input_ids"])
+                    padded_input_ids.append(f["input_ids"] + [self.tokenizer.pad_token_id] * padding_length)
+
+                    # Pad attention_mask (if it exists)
+                    if "attention_mask" in f:
+                        padded_attention_masks.append(f["attention_mask"] + [0] * padding_length)
+                    else:
+                        padded_attention_masks.append([1] * len(f["input_ids"]) + [0] * padding_length)
+
+                # Convert to tensors
+                batch = {
+                    "input_ids": torch.tensor(padded_input_ids),
+                    "attention_mask": torch.tensor(padded_attention_masks)
+                }
 
                 # Create labels with -100 for prompt tokens (ignored in loss)
                 labels = batch["input_ids"].clone()
@@ -959,6 +982,10 @@ class Kit:
                         labels[idx, :] = -100
                         templates_not_found += 1
                         masked_tokens += len(sequence)
+
+                    # Also mask padding tokens (where input_ids == pad_token_id)
+                    padding_mask = batch["input_ids"][idx] == self.tokenizer.pad_token_id
+                    labels[idx][padding_mask] = -100
 
                     total_tokens += len(sequence)
 
