@@ -149,7 +149,7 @@ class InstructionDataset:
 
         # Show sample of what the data looks like
         if len(tokenized) > 0:
-            sample_text = self.tokenizer.decode(tokenized[0]['input_ids'][:200])
+            sample_text = tokenizer.decode(tokenized[0]['input_ids'][:200])
             print(f"\nSample tokenized text (first 200 tokens):")
             print(f"---")
             print(sample_text)
