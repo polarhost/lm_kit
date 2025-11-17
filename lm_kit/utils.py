@@ -3,15 +3,18 @@ import numpy as np
 from transformers import GPT2Tokenizer
 
 def detect_gpu():
-    """Detect if we have T4 or A100"""
+    """Detect GPU type: T4, L4, or A100"""
     if not torch.cuda.is_available():
         raise RuntimeError("No GPU detected! This package requires a GPU.")
-    
+
     gpu_name = torch.cuda.get_device_name(0)
-    
+
     if "A100" in gpu_name:
         return "A100"
+    elif "L4" in gpu_name:
+        return "L4"
     else:
+        # Default to T4 for other GPUs (T4, V100, etc.)
         return "T4"
 
 def suggest_context_length(dataset, tokenizer):

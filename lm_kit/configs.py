@@ -28,6 +28,12 @@ BATCH_CONFIGS = {
         "30M": {"batch_size": 8, "grad_accum": 4},
         "100M": {"batch_size": 4, "grad_accum": 8},
     },
+    "L4": {
+        # L4 has ~50% more memory than T4 (24GB vs 16GB)
+        "10M": {"batch_size": 24, "grad_accum": 2},
+        "30M": {"batch_size": 12, "grad_accum": 4},
+        "100M": {"batch_size": 6, "grad_accum": 8},
+    },
     "A100": {
         "10M": {"batch_size": 32, "grad_accum": 2},
         "30M": {"batch_size": 16, "grad_accum": 4},
