@@ -957,8 +957,31 @@ class Kit:
                     current_output = None
                 continue
 
+            # Check if line contains both markers on the same line
+            if input_marker in line and output_marker in line:
+                # Save previous pair if exists
+                if current_input is not None and current_output is not None:
+                    pairs.append((current_input, current_output))
+
+                # Split by output marker to separate input and output
+                input_part, output_part = line.split(output_marker, 1)
+
+                # Extract input (remove input marker)
+                if input_part.startswith(input_marker):
+                    current_input = input_part[len(input_marker):].strip()
+                else:
+                    current_input = input_part.strip()
+
+                # Extract output
+                current_output = output_part.strip()
+
+                # Save this pair immediately
+                pairs.append((current_input, current_output))
+                current_input = None
+                current_output = None
+
             # Check if line starts with input marker
-            if line.startswith(input_marker):
+            elif line.startswith(input_marker):
                 # Save previous pair if exists
                 if current_input is not None and current_output is not None:
                     pairs.append((current_input, current_output))
