@@ -874,11 +874,53 @@ class Kit:
             disable_tqdm=False,
         )
 
-        # Data collator
-        data_collator = DataCollatorForLanguageModeling(
-            tokenizer=hf_model.tokenizer,
-            mlm=False
-        )
+        # Data collator - use response masking for instruction tuning
+        # This ensures we only train on the assistant's responses, not the prompts
+        try:
+            from trl import DataCollatorForCompletionOnly
+
+            # For conversational format, we need to identify where responses start
+            # Most chat templates use specific tokens or patterns
+            response_template = None
+
+            # Try to detect the response template based on tokenizer chat template
+            if hasattr(hf_model.tokenizer, 'chat_template') and hf_model.tokenizer.chat_template:
+                # Common patterns in chat templates
+                if 'assistant' in hf_model.tokenizer.chat_template.lower():
+                    # Try common assistant markers
+                    for marker in ['<|assistant|>', 'assistant\n', '[/INST]', '<|im_start|>assistant']:
+                        test_messages = [
+                            {"role": "user", "content": "test"},
+                            {"role": "assistant", "content": "response"}
+                        ]
+                        formatted = hf_model.tokenizer.apply_chat_template(
+                            test_messages, tokenize=False, add_generation_prompt=False
+                        )
+                        if marker in formatted:
+                            response_template = marker
+                            break
+
+            if response_template:
+                print(f"✓ Using response masking with template: '{response_template}'")
+                data_collator = DataCollatorForCompletionOnly(
+                    response_template=response_template,
+                    tokenizer=hf_model.tokenizer,
+                    mlm=False
+                )
+            else:
+                print("⚠ Could not detect response template, training on full sequence")
+                print("  This may reduce training effectiveness for instruction tuning")
+                data_collator = DataCollatorForLanguageModeling(
+                    tokenizer=hf_model.tokenizer,
+                    mlm=False
+                )
+        except ImportError:
+            print("⚠ TRL library not available, using standard data collator")
+            print("  Consider installing TRL for better instruction tuning: pip install trl")
+            data_collator = DataCollatorForLanguageModeling(
+                tokenizer=hf_model.tokenizer,
+                mlm=False
+            )
 
         # Create trainer
         trainer = Trainer(

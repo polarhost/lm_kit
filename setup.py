@@ -17,5 +17,6 @@ setup(
         "peft>=0.7.0",        # LoRA and parameter-efficient fine-tuning
         "accelerate>=0.24.0", # Memory optimization and multi-GPU support
         "bitsandbytes>=0.41.0",  # Required for 4-bit/8-bit quantization
+        "trl>=0.7.0",         # Transformer Reinforcement Learning (includes DataCollatorForCompletionOnly)
     ],
 )
