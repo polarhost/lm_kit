@@ -931,6 +931,12 @@ class Kit:
                 # Create labels with -100 for prompt tokens (ignored in loss)
                 labels = batch["input_ids"].clone()
 
+                # Diagnostic counters
+                templates_found = 0
+                templates_not_found = 0
+                total_tokens = 0
+                masked_tokens = 0
+
                 # For each sequence in the batch
                 for idx in range(labels.shape[0]):
                     sequence = batch["input_ids"][idx].tolist()
@@ -946,9 +952,43 @@ class Kit:
                     # Mask everything before the response
                     if response_start is not None:
                         labels[idx, :response_start] = -100
+                        templates_found += 1
+                        masked_tokens += response_start
                     else:
                         # If template not found, mask everything (fallback)
                         labels[idx, :] = -100
+                        templates_not_found += 1
+                        masked_tokens += len(sequence)
+
+                    total_tokens += len(sequence)
+
+                # Log diagnostics periodically (every 100 batches)
+                if not hasattr(self, '_batch_count'):
+                    self._batch_count = 0
+                    self._show_sample = True
+
+                self._batch_count += 1
+
+                if self._batch_count % 100 == 0 or self._show_sample:
+                    mask_pct = (masked_tokens / total_tokens * 100) if total_tokens > 0 else 0
+                    print(f"\n[Masking Debug - Batch {self._batch_count}]")
+                    print(f"  Templates found: {templates_found}/{len(features)}")
+                    print(f"  Templates NOT found: {templates_not_found}/{len(features)}")
+                    print(f"  Tokens masked: {masked_tokens}/{total_tokens} ({mask_pct:.1f}%)")
+
+                    # Show a sample on first batch
+                    if self._show_sample and len(features) > 0:
+                        print(f"\n  Sample from first sequence:")
+                        sample_ids = batch["input_ids"][0].tolist()
+                        sample_labels = labels[0].tolist()
+
+                        # Decode and show what's masked vs unmasked
+                        masked_part = [token_id for token_id, label in zip(sample_ids, sample_labels) if label == -100]
+                        unmasked_part = [token_id for token_id, label in zip(sample_ids, sample_labels) if label != -100]
+
+                        print(f"  MASKED (not trained): {self.tokenizer.decode(masked_part)[:200]}")
+                        print(f"  UNMASKED (trained): {self.tokenizer.decode(unmasked_part)[:200]}")
+                        self._show_sample = False
 
                 batch["labels"] = labels
                 return batch
