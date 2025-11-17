@@ -296,24 +296,38 @@ class HFModel:
         self.model.eval()
         return self
 
-    def complete(self, prompt, max_length=200, temperature=0.8):
-        """Generate text completion"""
+    def complete(self, prompt, max_new_tokens=100, temperature=0.8, stop_at_eos=True):
+        """Generate text completion
+
+        Args:
+            prompt: Input text to complete
+            max_new_tokens: Maximum number of NEW tokens to generate (not including prompt)
+            temperature: Sampling temperature (higher = more random)
+            stop_at_eos: If True, stop generation at EOS token (recommended for chat models)
+        """
         inputs = self.tokenizer(prompt, return_tensors="pt")
 
         if torch.cuda.is_available():
             inputs = {k: v.cuda() for k, v in inputs.items()}
 
+        # Build generation kwargs
+        gen_kwargs = {
+            "max_new_tokens": max_new_tokens,
+            "temperature": temperature,
+            "do_sample": True,
+            "top_k": 50,
+            "top_p": 0.95,
+            "repetition_penalty": 1.2,
+            "pad_token_id": self.tokenizer.eos_token_id,
+        }
+
+        # Add stopping criteria for chat models
+        if stop_at_eos and hasattr(self.tokenizer, 'eos_token_id'):
+            # Stop at EOS token (like <|im_end|>)
+            gen_kwargs["eos_token_id"] = self.tokenizer.eos_token_id
+
         with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_length=max_length,
-                temperature=temperature,
-                do_sample=True,
-                top_k=50,
-                top_p=0.95,
-                repetition_penalty=1.2,
-                pad_token_id=self.tokenizer.eos_token_id,
-            )
+            outputs = self.model.generate(**inputs, **gen_kwargs)
 
         return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
 
