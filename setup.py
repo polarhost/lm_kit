@@ -16,8 +16,6 @@ setup(
         "datasets>=2.0.0",
         "peft>=0.7.0",        # LoRA and parameter-efficient fine-tuning
         "accelerate>=0.24.0", # Memory optimization and multi-GPU support
+        "bitsandbytes>=0.41.0",  # Required for 4-bit/8-bit quantization
     ],
-    extras_require={
-        "quantization": ["bitsandbytes>=0.41.0"],  # Optional: 4-bit/8-bit quantization
-    },
 )
