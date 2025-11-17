@@ -3,10 +3,15 @@ from datasets import load_dataset as hf_load_dataset
 from datasets import Dataset as HFDataset
 from transformers import (
     GPT2Config, GPT2LMHeadModel, GPT2Tokenizer,
-    Trainer, TrainingArguments, DataCollatorForLanguageModeling
+    Trainer, TrainingArguments, DataCollatorForLanguageModeling,
+    AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 )
-from .configs import MODEL_PRESETS, BATCH_CONFIGS
+from .configs import MODEL_PRESETS, BATCH_CONFIGS, LORA_PRESETS, QUANTIZATION_CONFIGS, LORA_TARGET_MODULES
 from .utils import detect_gpu, suggest_context_length, estimate_total_tokens, calculate_training_steps
+from .lora_utils import (
+    detect_lora_target_modules, estimate_lora_params,
+    prepare_model_for_kbit_training, format_chat_template, get_memory_footprint
+)
 
 def _train_custom_tokenizer(dataset, vocab_size=16384):
     """
@@ -58,9 +63,95 @@ def _train_custom_tokenizer(dataset, vocab_size=16384):
     return wrapped_tokenizer
 
 
+class InstructionDataset:
+    """Dataset for instruction/chat fine-tuning with LoRA"""
+
+    def __init__(self, data, format_type="conversational"):
+        """
+        Initialize instruction dataset.
+
+        Args:
+            data: List of examples or HuggingFace dataset
+                  For conversational format: [{"messages": [{"role": "user", "content": "..."}, ...]}, ...]
+                  For completion format: [{"prompt": "...", "completion": "..."}, ...]
+            format_type: "conversational" or "completion"
+        """
+        if format_type not in ["conversational", "completion"]:
+            raise ValueError("format_type must be 'conversational' or 'completion'")
+
+        self.format_type = format_type
+
+        # Convert to HuggingFace dataset if it's a list
+        if isinstance(data, list):
+            self.raw = HFDataset.from_list(data)
+        else:
+            self.raw = data
+
+    def prepare_for_training(self, tokenizer, max_length=512):
+        """
+        Prepare dataset for LoRA training by applying chat template and tokenization.
+
+        Args:
+            tokenizer: The model's tokenizer
+            max_length: Maximum sequence length
+
+        Returns:
+            Tokenized HuggingFace dataset ready for training
+        """
+        def tokenize_conversational(examples):
+            """Tokenize conversational format using chat template"""
+            texts = []
+            for messages in examples["messages"]:
+                text = format_chat_template(messages, tokenizer)
+                texts.append(text)
+
+            return tokenizer(
+                texts,
+                truncation=True,
+                max_length=max_length,
+                padding=False,
+            )
+
+        def tokenize_completion(examples):
+            """Tokenize completion format"""
+            # For completion format, we concatenate prompt and completion
+            # The DataCollatorForCompletionOnlyLM will handle masking the prompt
+            texts = [
+                f"{prompt}\n{completion}"
+                for prompt, completion in zip(examples["prompt"], examples["completion"])
+            ]
+
+            return tokenizer(
+                texts,
+                truncation=True,
+                max_length=max_length,
+                padding=False,
+            )
+
+        print(f"Tokenizing instruction dataset ({self.format_type} format)...")
+
+        if self.format_type == "conversational":
+            tokenized = self.raw.map(
+                tokenize_conversational,
+                batched=True,
+                remove_columns=self.raw.column_names,
+                desc="Tokenizing"
+            )
+        else:  # completion
+            tokenized = self.raw.map(
+                tokenize_completion,
+                batched=True,
+                remove_columns=self.raw.column_names,
+                desc="Tokenizing"
+            )
+
+        print(f"✓ Tokenized {len(tokenized):,} examples\n")
+        return tokenized
+
+
 class Dataset:
-    """Wrapper around HuggingFace dataset with analysis"""
-    
+    """Wrapper around HuggingFace dataset with analysis (for pretraining)"""
+
     def __init__(self, hf_dataset, tokenizer):
         self.raw = hf_dataset
         self.tokenizer = tokenizer
@@ -115,36 +206,36 @@ class Dataset:
 
 class Model:
     """Language model wrapper"""
-    
+
     def __init__(self, model, tokenizer, trainer, model_size):
         self.model = model
         self.tokenizer = tokenizer
         self.trainer = trainer
         self.model_size = model_size
-        
+
     def train(self):
         """Train the model"""
         print("=" * 70)
         print("STARTING TRAINING")
         print("=" * 70)
-        
+
         result = self.trainer.train()
-        
+
         print("\n" + "=" * 70)
         print("TRAINING COMPLETE!")
         print("=" * 70)
         print(f"Final loss: {result.training_loss:.4f}\n")
-        
+
         self.model.eval()
         return self
-    
+
     def complete(self, prompt, max_length=200, temperature=0.8):
         """Generate text completion"""
         inputs = self.tokenizer(prompt, return_tensors="pt")
-        
+
         if torch.cuda.is_available():
             inputs = {k: v.cuda() for k, v in inputs.items()}
-        
+
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
@@ -156,14 +247,98 @@ class Model:
                 repetition_penalty=1.2,
                 pad_token_id=self.tokenizer.eos_token_id,
             )
-        
+
         return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-    
+
     def save(self, path):
         """Save model to disk"""
         self.trainer.save_model(path)
         self.tokenizer.save_pretrained(path)
         print(f"Model saved to {path}")
+
+
+class HFModel:
+    """HuggingFace model wrapper with LoRA support"""
+
+    def __init__(self, model, tokenizer, model_name, is_quantized=False):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.model_name = model_name
+        self.is_quantized = is_quantized
+        self.trainer = None
+        self.is_lora_enabled = False
+
+    def train(self):
+        """Train the LoRA model"""
+        if self.trainer is None:
+            raise ValueError("No trainer configured. Call kit.lora_tune() first.")
+
+        print("=" * 70)
+        print("STARTING LORA FINE-TUNING")
+        print("=" * 70)
+
+        result = self.trainer.train()
+
+        print("\n" + "=" * 70)
+        print("LORA FINE-TUNING COMPLETE!")
+        print("=" * 70)
+        print(f"Final loss: {result.training_loss:.4f}\n")
+
+        self.model.eval()
+        return self
+
+    def complete(self, prompt, max_length=200, temperature=0.8):
+        """Generate text completion"""
+        inputs = self.tokenizer(prompt, return_tensors="pt")
+
+        if torch.cuda.is_available():
+            inputs = {k: v.cuda() for k, v in inputs.items()}
+
+        with torch.no_grad():
+            outputs = self.model.generate(
+                **inputs,
+                max_length=max_length,
+                temperature=temperature,
+                do_sample=True,
+                top_k=50,
+                top_p=0.95,
+                repetition_penalty=1.2,
+                pad_token_id=self.tokenizer.eos_token_id,
+            )
+
+        return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+    def save_adapter(self, path):
+        """Save only the LoRA adapter weights (lightweight)"""
+        if not self.is_lora_enabled:
+            raise ValueError("No LoRA adapter to save. Call kit.lora_tune() first.")
+
+        self.model.save_pretrained(path)
+        self.tokenizer.save_pretrained(path)
+        print(f"✓ LoRA adapter saved to {path}")
+        print(f"  (Adapter is small, typically 10-100MB)")
+
+    def save_merged(self, path):
+        """Merge LoRA weights with base model and save (larger file)"""
+        if not self.is_lora_enabled:
+            raise ValueError("No LoRA adapter to merge. Call kit.lora_tune() first.")
+
+        print("Merging LoRA weights with base model...")
+        merged_model = self.model.merge_and_unload()
+
+        merged_model.save_pretrained(path)
+        self.tokenizer.save_pretrained(path)
+        print(f"✓ Merged model saved to {path}")
+        print(f"  (Full model, can be loaded without LoRA)")
+
+    def load_adapter(self, adapter_path):
+        """Load a LoRA adapter onto this model"""
+        from peft import PeftModel
+
+        print(f"Loading LoRA adapter from {adapter_path}...")
+        self.model = PeftModel.from_pretrained(self.model, adapter_path)
+        self.is_lora_enabled = True
+        print("✓ LoRA adapter loaded successfully\n")
 
 
 class Kit:
@@ -345,10 +520,15 @@ class Kit:
     
     def load_model(self, path, model_size=None):
         """
-        Load a pre-trained model from disk.
+        Load a pre-trained model from disk or cloud storage.
 
         Args:
-            path: Path to the saved model directory
+            path: Path to the saved model directory (local path) or URL (cloud storage).
+                  Supported URL formats:
+                  - HTTP/HTTPS: https://example.com/model
+                  - S3: s3://bucket/path/to/model
+                  - GCS: gs://bucket/path/to/model
+                  - Azure: https://account.blob.core.windows.net/container/path
             model_size: Optional model size ("10M", "30M", or "100M").
                        If not provided, will be inferred from config.json
 
@@ -356,21 +536,36 @@ class Kit:
             Model instance ready for inference with complete() method
         """
         import os
+        import re
         from transformers import AutoTokenizer
 
-        # Validate path exists
-        if not os.path.exists(path):
-            raise ValueError(f"Model path does not exist: {path}")
+        # Determine if path is a URL or local path using regex
+        url_pattern = re.compile(
+            r'^(https?://|s3://|gs://|[a-zA-Z0-9]+://)',
+            re.IGNORECASE
+        )
+        is_url = bool(url_pattern.match(path))
 
-        print(f"Loading model from: {path}")
+        if is_url:
+            print(f"Loading model from URL: {path}")
+            print("(Downloading from cloud storage...)")
+        else:
+            print(f"Loading model from disk: {path}")
+            # Validate local path exists
+            if not os.path.exists(path):
+                raise ValueError(f"Model path does not exist: {path}")
+
         print("-" * 50)
 
-        # Load the model
         try:
             model = GPT2LMHeadModel.from_pretrained(path)
             print("✓ Model loaded successfully")
         except Exception as e:
-            raise ValueError(f"Failed to load model from {path}: {str(e)}")
+            if is_url:
+                raise ValueError(f"Failed to load model from URL {path}: {str(e)}\n"
+                               f"Ensure the URL is accessible and contains valid model files.")
+            else:
+                raise ValueError(f"Failed to load model from {path}: {str(e)}")
 
         # Load the tokenizer
         try:
@@ -380,7 +575,10 @@ class Kit:
                 tokenizer.pad_token = tokenizer.eos_token
             print("✓ Tokenizer loaded successfully")
         except Exception as e:
-            raise ValueError(f"Failed to load tokenizer from {path}: {str(e)}")
+            if is_url:
+                raise ValueError(f"Failed to load tokenizer from URL {path}: {str(e)}")
+            else:
+                raise ValueError(f"Failed to load tokenizer from {path}: {str(e)}")
 
         # Infer model size if not provided
         if model_size is None:
@@ -426,6 +624,460 @@ class Kit:
 
         # Return Model instance (trainer=None since we're not training)
         return Model(model, tokenizer, trainer=None, model_size=model_size)
+
+    def load_hf_model(self, model_name, quantization=None, device_map="auto", trust_remote_code=False):
+        """
+        Load any HuggingFace model for LoRA fine-tuning.
+
+        Args:
+            model_name: HuggingFace model identifier (e.g., "meta-llama/Llama-3.2-3B-Instruct",
+                       "deepseek-ai/DeepSeek-Coder-V2-Instruct", "gpt2")
+            quantization: Quantization mode - None, "4bit", or "8bit"
+                         Quantization reduces memory usage (e.g., 3B model in ~3GB instead of ~12GB)
+            device_map: Device mapping strategy - "auto" (recommended), "cuda:0", or custom mapping
+            trust_remote_code: Whether to trust remote code (needed for some models)
+
+        Returns:
+            HFModel instance ready for LoRA fine-tuning
+
+        Examples:
+            # Load Llama model with 4-bit quantization
+            model = kit.load_hf_model("meta-llama/Llama-3.2-3B-Instruct", quantization="4bit")
+
+            # Load DeepSeek model
+            model = kit.load_hf_model("deepseek-ai/DeepSeek-Coder-V2-Instruct", quantization="4bit")
+
+            # Load without quantization (requires more memory)
+            model = kit.load_hf_model("gpt2")
+        """
+        print(f"Loading HuggingFace model: {model_name}")
+        print("=" * 70)
+
+        # Setup quantization config if requested
+        quant_config = None
+        is_quantized = False
+
+        if quantization is not None:
+            if quantization not in QUANTIZATION_CONFIGS:
+                raise ValueError(f"quantization must be None, '4bit', or '8bit', got '{quantization}'")
+
+            is_quantized = True
+            quant_dict = QUANTIZATION_CONFIGS[quantization].copy()
+
+            # Convert dtype string to torch dtype
+            if "bnb_4bit_compute_dtype" in quant_dict:
+                compute_dtype = quant_dict["bnb_4bit_compute_dtype"]
+                if compute_dtype == "float16":
+                    quant_dict["bnb_4bit_compute_dtype"] = torch.float16
+                elif compute_dtype == "bfloat16":
+                    quant_dict["bnb_4bit_compute_dtype"] = torch.bfloat16
+
+            quant_config = BitsAndBytesConfig(**quant_dict)
+            print(f"Quantization: {quantization}")
+        else:
+            print("Quantization: None (full precision)")
+
+        print(f"Device mapping: {device_map}")
+        print()
+
+        # Load tokenizer
+        try:
+            print("Loading tokenizer...")
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_name,
+                trust_remote_code=trust_remote_code
+            )
+
+            # Ensure pad_token is set
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
+
+            print("✓ Tokenizer loaded successfully")
+        except Exception as e:
+            raise ValueError(f"Failed to load tokenizer for '{model_name}': {str(e)}")
+
+        # Load model
+        try:
+            print("Loading model (this may take a few minutes)...")
+
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                quantization_config=quant_config,
+                device_map=device_map,
+                trust_remote_code=trust_remote_code,
+                torch_dtype=torch.float16 if not is_quantized else None,
+            )
+
+            print("✓ Model loaded successfully")
+        except Exception as e:
+            raise ValueError(f"Failed to load model '{model_name}': {str(e)}\n"
+                           f"Make sure the model name is correct and you have access to it.")
+
+        # Get model information
+        num_params = sum(p.numel() for p in model.parameters())
+        memory_stats = get_memory_footprint(model)
+
+        print(f"\nModel Information")
+        print("-" * 70)
+        print(f"Model: {model_name}")
+        print(f"Architecture: {model.config.model_type}")
+        print(f"Total parameters: {num_params:,} ({num_params/1e6:.1f}M)")
+        print(f"Hidden size: {model.config.hidden_size}")
+        print(f"Num layers: {model.config.num_hidden_layers}")
+        print(f"Vocab size: {model.config.vocab_size:,}")
+        print(f"\nMemory footprint: ~{memory_stats['model_size_gb']:.2f} GB")
+        print(f"Quantized: {memory_stats['quantized']}")
+
+        # Set model to training mode for LoRA
+        model.train()
+
+        print("\n✓ Model ready for LoRA fine-tuning")
+        print("  Next step: Use kit.lora_tune(model, dataset) to configure LoRA\n")
+
+        return HFModel(
+            model=model,
+            tokenizer=tokenizer,
+            model_name=model_name,
+            is_quantized=is_quantized
+        )
+
+    def lora_tune(self, hf_model, dataset, lora_preset="medium", learning_rate=2e-4,
+                  steps=1000, batch_size=4, gradient_accumulation_steps=4,
+                  max_length=512, output_dir="./lora_output"):
+        """
+        Configure LoRA fine-tuning for a HuggingFace model.
+
+        Args:
+            hf_model: HFModel instance from load_hf_model()
+            dataset: InstructionDataset instance with training data
+            lora_preset: LoRA configuration preset - "small" (r=8), "medium" (r=16), or "large" (r=32)
+            learning_rate: Learning rate for training (2e-4 is good default for LoRA)
+            steps: Number of training steps
+            batch_size: Batch size per device
+            gradient_accumulation_steps: Gradient accumulation steps
+            max_length: Maximum sequence length for training
+            output_dir: Directory to save checkpoints and final model
+
+        Returns:
+            HFModel instance with LoRA configured and ready for training
+
+        Example:
+            model = kit.load_hf_model("meta-llama/Llama-3.2-3B-Instruct", quantization="4bit")
+            dataset = kit.create_instruction_dataset([...])
+            tuned_model = kit.lora_tune(model, dataset, steps=1000)
+            tuned_model.train()
+        """
+        from peft import LoraConfig, get_peft_model, TaskType
+
+        if not isinstance(hf_model, HFModel):
+            raise ValueError("hf_model must be an HFModel instance from load_hf_model()")
+
+        if not isinstance(dataset, InstructionDataset):
+            raise ValueError("dataset must be an InstructionDataset instance from create_instruction_dataset()")
+
+        print("=" * 70)
+        print("CONFIGURING LORA FINE-TUNING")
+        print("=" * 70)
+
+        # Get LoRA configuration
+        if lora_preset not in LORA_PRESETS:
+            raise ValueError(f"lora_preset must be one of {list(LORA_PRESETS.keys())}, got '{lora_preset}'")
+
+        lora_config_dict = LORA_PRESETS[lora_preset].copy()
+
+        # Auto-detect target modules if not specified
+        if lora_config_dict["target_modules"] is None:
+            target_modules = detect_lora_target_modules(hf_model.model)
+            lora_config_dict["target_modules"] = target_modules
+        else:
+            target_modules = lora_config_dict["target_modules"]
+
+        print(f"\nLoRA Configuration")
+        print("-" * 70)
+        print(f"Preset: {lora_preset}")
+        print(f"Rank (r): {lora_config_dict['r']}")
+        print(f"Alpha: {lora_config_dict['lora_alpha']}")
+        print(f"Dropout: {lora_config_dict['lora_dropout']}")
+        print(f"Target modules: {target_modules}")
+
+        # Estimate trainable parameters
+        lora_stats = estimate_lora_params(
+            hf_model.model,
+            lora_config_dict['r'],
+            target_modules
+        )
+
+        print(f"\nParameter Statistics")
+        print("-" * 70)
+        print(f"Total model parameters: {lora_stats['total_params']:,}")
+        print(f"LoRA trainable parameters: ~{lora_stats['lora_params']:,}")
+        print(f"Trainable: ~{lora_stats['trainable_percentage']:.2f}%")
+
+        # Create LoRA config
+        lora_config = LoraConfig(
+            r=lora_config_dict['r'],
+            lora_alpha=lora_config_dict['lora_alpha'],
+            lora_dropout=lora_config_dict['lora_dropout'],
+            target_modules=target_modules,
+            bias=lora_config_dict['bias'],
+            task_type=TaskType.CAUSAL_LM,
+        )
+
+        # Prepare model for training if quantized
+        if hf_model.is_quantized:
+            print("\nPreparing quantized model for training...")
+            hf_model.model = prepare_model_for_kbit_training(hf_model.model)
+
+        # Apply LoRA to model
+        print("Applying LoRA to model...")
+        hf_model.model = get_peft_model(hf_model.model, lora_config)
+        hf_model.is_lora_enabled = True
+
+        # Print trainable parameters
+        trainable_params = sum(p.numel() for p in hf_model.model.parameters() if p.requires_grad)
+        all_params = sum(p.numel() for p in hf_model.model.parameters())
+
+        print(f"\n✓ LoRA applied successfully")
+        print(f"Actual trainable parameters: {trainable_params:,} ({100 * trainable_params / all_params:.2f}%)")
+
+        # Prepare dataset
+        print(f"\nPreparing dataset...")
+        tokenized_dataset = dataset.prepare_for_training(hf_model.tokenizer, max_length=max_length)
+
+        # Setup training arguments
+        print(f"\nTraining Configuration")
+        print("-" * 70)
+        print(f"Steps: {steps:,}")
+        print(f"Batch size: {batch_size}")
+        print(f"Gradient accumulation: {gradient_accumulation_steps}")
+        print(f"Effective batch size: {batch_size * gradient_accumulation_steps}")
+        print(f"Learning rate: {learning_rate}")
+        print(f"Max sequence length: {max_length}")
+        print(f"Output directory: {output_dir}")
+
+        training_args = TrainingArguments(
+            output_dir=output_dir,
+            per_device_train_batch_size=batch_size,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            max_steps=steps,
+            learning_rate=learning_rate,
+            fp16=True if not hf_model.is_quantized else False,
+            bf16=False,
+            logging_steps=50,
+            save_steps=max(steps // 3, 100),
+            save_total_limit=2,
+            optim="paged_adamw_8bit" if hf_model.is_quantized else "adamw_torch",
+            warmup_steps=min(100, steps // 10),
+            lr_scheduler_type="cosine",
+            gradient_checkpointing=True,
+            report_to="none",
+            disable_tqdm=False,
+        )
+
+        # Data collator
+        data_collator = DataCollatorForLanguageModeling(
+            tokenizer=hf_model.tokenizer,
+            mlm=False
+        )
+
+        # Create trainer
+        trainer = Trainer(
+            model=hf_model.model,
+            args=training_args,
+            train_dataset=tokenized_dataset,
+            data_collator=data_collator,
+        )
+
+        # Assign trainer to model
+        hf_model.trainer = trainer
+
+        print("\n✓ LoRA fine-tuning configured successfully")
+        print("  Next step: Call model.train() to start fine-tuning\n")
+
+        return hf_model
+
+    def encode_twoway_to_lora(self, text_or_file, input_marker="Q:", output_marker="A:",
+                               system_prompt=None, format_type="conversational"):
+        """
+        Encode plain text question-answer pairs into LoRA training format.
+
+        This method makes it easy to create datasets from simple text files where
+        input and output are marked with identifiers like "Q:" and "A:".
+
+        Args:
+            text_or_file: Either a string containing the text, or a file path to read from
+            input_marker: Marker that identifies input/questions (default "Q:")
+            output_marker: Marker that identifies output/answers (default "A:")
+            system_prompt: Optional system prompt to add to each example (for conversational format)
+            format_type: "conversational" (default) or "completion"
+
+        Returns:
+            List of formatted examples ready for create_instruction_dataset()
+
+        Examples:
+            # From text string
+            text = '''
+            Q: What is programming?
+            A: Hark! 'Tis the art of instructing mechanical minds.
+
+            Q: How do I learn Python?
+            A: Marry, good scholar! Begin with variables.
+            '''
+            data = kit.encode_twoway_to_lora(text, system_prompt="You are Shakespeare")
+
+            # From file
+            data = kit.encode_twoway_to_lora("data.txt", input_marker="Q:", output_marker="A:")
+
+            # Then create dataset
+            dataset = kit.create_instruction_dataset(data)
+        """
+        import os
+
+        # Read from file if path is provided
+        if isinstance(text_or_file, str) and os.path.isfile(text_or_file):
+            print(f"Reading from file: {text_or_file}")
+            with open(text_or_file, 'r', encoding='utf-8') as f:
+                text = f.read()
+        else:
+            text = text_or_file
+
+        # Split text into lines and parse pairs
+        lines = text.strip().split('\n')
+        pairs = []
+        current_input = None
+        current_output = None
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                # Empty line - if we have a complete pair, save it
+                if current_input is not None and current_output is not None:
+                    pairs.append((current_input, current_output))
+                    current_input = None
+                    current_output = None
+                continue
+
+            # Check if line starts with input marker
+            if line.startswith(input_marker):
+                # Save previous pair if exists
+                if current_input is not None and current_output is not None:
+                    pairs.append((current_input, current_output))
+                # Start new input
+                current_input = line[len(input_marker):].strip()
+                current_output = None
+
+            # Check if line starts with output marker
+            elif line.startswith(output_marker):
+                current_output = line[len(output_marker):].strip()
+
+            # Continuation of previous line
+            else:
+                if current_output is not None:
+                    # Continue the output
+                    current_output += " " + line
+                elif current_input is not None:
+                    # Continue the input
+                    current_input += " " + line
+
+        # Don't forget the last pair
+        if current_input is not None and current_output is not None:
+            pairs.append((current_input, current_output))
+
+        if not pairs:
+            raise ValueError(
+                f"No pairs found! Make sure your text contains '{input_marker}' and '{output_marker}' markers.\n"
+                f"Example format:\n"
+                f"{input_marker} Your question here\n"
+                f"{output_marker} Your answer here\n"
+            )
+
+        # Convert to appropriate format
+        formatted_data = []
+
+        if format_type == "conversational":
+            for inp, out in pairs:
+                example = {
+                    "messages": []
+                }
+
+                # Add system prompt if provided
+                if system_prompt:
+                    example["messages"].append({
+                        "role": "system",
+                        "content": system_prompt
+                    })
+
+                # Add user input and assistant output
+                example["messages"].append({
+                    "role": "user",
+                    "content": inp
+                })
+                example["messages"].append({
+                    "role": "assistant",
+                    "content": out
+                })
+
+                formatted_data.append(example)
+
+        elif format_type == "completion":
+            for inp, out in pairs:
+                formatted_data.append({
+                    "prompt": inp,
+                    "completion": out
+                })
+        else:
+            raise ValueError(f"format_type must be 'conversational' or 'completion', got '{format_type}'")
+
+        print(f"✓ Encoded {len(formatted_data):,} question-answer pairs")
+        print(f"  Input marker: '{input_marker}'")
+        print(f"  Output marker: '{output_marker}'")
+        print(f"  Format: {format_type}")
+        if system_prompt:
+            print(f"  System prompt: '{system_prompt}'")
+        print()
+
+        return formatted_data
+
+    def create_instruction_dataset(self, data, format_type="conversational"):
+        """
+        Create an instruction dataset for LoRA fine-tuning.
+
+        Args:
+            data: List of training examples
+                  For conversational format:
+                    [{"messages": [{"role": "user", "content": "..."},
+                                   {"role": "assistant", "content": "..."}]}, ...]
+                  For completion format:
+                    [{"prompt": "...", "completion": "..."}, ...]
+            format_type: "conversational" (default) or "completion"
+
+        Returns:
+            InstructionDataset instance ready for lora_tune()
+
+        Examples:
+            # Conversational format (for chat models)
+            dataset = kit.create_instruction_dataset([
+                {
+                    "messages": [
+                        {"role": "system", "content": "You are Shakespeare"},
+                        {"role": "user", "content": "What is programming?"},
+                        {"role": "assistant", "content": "Hark! 'Tis the art of..."}
+                    ]
+                },
+                # ... more examples
+            ])
+
+            # Completion format (simpler)
+            dataset = kit.create_instruction_dataset([
+                {"prompt": "Translate to Shakespeare: Hello",
+                 "completion": "Good morrow to thee!"},
+                # ... more examples
+            ], format_type="completion")
+        """
+        print(f"Creating instruction dataset ({format_type} format)")
+        print(f"Examples: {len(data):,}\n")
+
+        return InstructionDataset(data, format_type=format_type)
 
     def create_paper_model(self):
         """

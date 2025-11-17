@@ -36,3 +36,55 @@ BATCH_CONFIGS = {
 }
 
 CONTEXT_LENGTHS = [256, 512, 1024]
+
+# LoRA configuration presets
+LORA_PRESETS = {
+    "small": {
+        "r": 8,
+        "lora_alpha": 16,
+        "lora_dropout": 0.05,
+        "target_modules": None,  # Auto-detect
+        "bias": "none",
+        "task_type": "CAUSAL_LM",
+    },
+    "medium": {
+        "r": 16,
+        "lora_alpha": 32,
+        "lora_dropout": 0.05,
+        "target_modules": None,  # Auto-detect
+        "bias": "none",
+        "task_type": "CAUSAL_LM",
+    },
+    "large": {
+        "r": 32,
+        "lora_alpha": 64,
+        "lora_dropout": 0.1,
+        "target_modules": None,  # Auto-detect
+        "bias": "none",
+        "task_type": "CAUSAL_LM",
+    },
+}
+
+# Quantization configurations
+QUANTIZATION_CONFIGS = {
+    "4bit": {
+        "load_in_4bit": True,
+        "bnb_4bit_compute_dtype": "float16",
+        "bnb_4bit_quant_type": "nf4",
+        "bnb_4bit_use_double_quant": True,
+    },
+    "8bit": {
+        "load_in_8bit": True,
+    },
+}
+
+# LoRA target modules mapping for different model architectures
+LORA_TARGET_MODULES = {
+    "llama": ["q_proj", "v_proj", "k_proj", "o_proj"],
+    "mistral": ["q_proj", "v_proj", "k_proj", "o_proj"],
+    "deepseek": ["q_proj", "v_proj", "k_proj", "o_proj"],
+    "deepseek_v2": ["q_proj", "v_proj", "k_proj", "o_proj"],
+    "gpt2": ["c_attn"],
+    "gpt_neox": ["query_key_value"],
+    "falcon": ["query_key_value"],
+}
