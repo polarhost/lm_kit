@@ -11,7 +11,7 @@ def detect_lora_target_modules(model):
         model: The HuggingFace model instance
 
     Returns:
-        list: List of module names to apply LoRA to, or None for PEFT defaults
+        list: List of module names to apply LoRA to
     """
     model_type = model.config.model_type.lower()
 
@@ -19,9 +19,43 @@ def detect_lora_target_modules(model):
     if model_type in LORA_TARGET_MODULES:
         return LORA_TARGET_MODULES[model_type]
 
-    # For unknown models, return None to use PEFT's automatic detection
-    print(f"⚠ Unknown model type '{model_type}', using PEFT auto-detection for target modules")
-    return None
+    # For unknown models, introspect the actual model structure
+    print(f"⚠ Unknown model type '{model_type}', auto-detecting attention modules...")
+
+    target_modules = set()
+
+    # Iterate through all named modules to find attention projection layers
+    for name, module in model.named_modules():
+        # Look for common attention projection layer patterns
+        module_name = name.split('.')[-1] if '.' in name else name
+
+        # Common patterns across different architectures:
+        # - q_proj, k_proj, v_proj, o_proj (Llama, Mistral, etc.)
+        # - query, key, value, dense (BERT-style)
+        # - c_attn, c_proj (GPT-2 style)
+        # - query_key_value (GPT-NeoX, Falcon)
+        # - Wqkv, out_proj (some custom models)
+
+        if any(pattern in module_name.lower() for pattern in [
+            'q_proj', 'k_proj', 'v_proj', 'o_proj',  # Llama/Mistral style
+            'query', 'key', 'value',                  # Generic attention
+            'c_attn', 'c_proj',                       # GPT-2 style
+            'query_key_value',                        # GPT-NeoX style
+            'qkv_proj', 'out_proj',                   # Alternative naming
+            'wq', 'wk', 'wv', 'wo',                   # Short form
+        ]):
+            # Only add Linear layers (not LayerNorm, etc.)
+            if 'Linear' in str(type(module)):
+                target_modules.add(module_name)
+
+    if not target_modules:
+        # Fallback: if we can't find anything, use a common default
+        print("⚠ Could not auto-detect attention modules, using common defaults")
+        target_modules = {"q_proj", "v_proj", "k_proj", "o_proj"}
+    else:
+        print(f"✓ Auto-detected target modules: {sorted(target_modules)}")
+
+    return list(target_modules)
 
 
 def estimate_lora_params(model, lora_r, target_modules=None):
