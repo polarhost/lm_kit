@@ -876,7 +876,51 @@ class Kit:
 
         # Data collator - use response masking for instruction tuning
         # This ensures we only train on the assistant's responses, not the prompts
-        from trl import DataCollatorForCompletionOnly
+
+        # Implement our own response masking data collator
+        class ResponseMaskingDataCollator:
+            """Data collator that masks prompt tokens, only training on responses"""
+
+            def __init__(self, tokenizer, response_template, mlm=False):
+                self.tokenizer = tokenizer
+                self.response_template = response_template
+                self.mlm = mlm
+
+                # Encode the response template to find it in sequences
+                self.response_template_ids = tokenizer.encode(
+                    response_template,
+                    add_special_tokens=False
+                )
+
+            def __call__(self, features):
+                # Use standard data collator for padding
+                from transformers import default_data_collator
+                batch = default_data_collator(features)
+
+                # Create labels with -100 for prompt tokens (ignored in loss)
+                labels = batch["input_ids"].clone()
+
+                # For each sequence in the batch
+                for idx in range(labels.shape[0]):
+                    sequence = batch["input_ids"][idx].tolist()
+
+                    # Find where the response template starts
+                    response_start = None
+                    for i in range(len(sequence) - len(self.response_template_ids) + 1):
+                        if sequence[i:i+len(self.response_template_ids)] == self.response_template_ids:
+                            # Response starts after the template
+                            response_start = i + len(self.response_template_ids)
+                            break
+
+                    # Mask everything before the response
+                    if response_start is not None:
+                        labels[idx, :response_start] = -100
+                    else:
+                        # If template not found, mask everything (fallback)
+                        labels[idx, :] = -100
+
+                batch["labels"] = labels
+                return batch
 
         # For conversational format, we need to identify where responses start
         # Most chat templates use specific tokens or patterns
@@ -973,9 +1017,9 @@ class Kit:
 
             print(f"{'='*70}\n")
 
-            data_collator = DataCollatorForCompletionOnly(
-                response_template=detected_template,
+            data_collator = ResponseMaskingDataCollator(
                 tokenizer=hf_model.tokenizer,
+                response_template=detected_template,
                 mlm=False
             )
         else:
