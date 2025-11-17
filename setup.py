@@ -4,6 +4,9 @@ setup(
     name="lm_kit",
     version="0.1.0",
     packages=find_packages(),
+    package_data={
+        "lm_kit": ["datasets/*.txt"],  # Include built-in dataset files
+    },
     python_requires=">=3.7",
     description="A simple language model kit",
     author="polarhost",
