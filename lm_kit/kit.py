@@ -355,12 +355,16 @@ class HFModel:
         with torch.no_grad():
             outputs = self.model.generate(**inputs, **gen_kwargs)
 
-        result = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-        # If we formatted as chat, extract just the assistant response
+        # Decode only the newly generated tokens (not the input prompt)
         if hasattr(self.tokenizer, 'chat_template') and self.tokenizer.chat_template:
-            # Remove the prompt part to return only the generated response
-            result = result[len(formatted_prompt):].strip()
+            # Get the length of the input prompt in tokens
+            input_length = inputs["input_ids"].shape[1]
+            # Decode only the new tokens
+            new_tokens = outputs[0][input_length:]
+            result = self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+        else:
+            # For non-chat models, return the full output
+            result = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
 
         return result
 
