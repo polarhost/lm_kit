@@ -296,16 +296,42 @@ class HFModel:
         self.model.eval()
         return self
 
-    def complete(self, prompt, max_new_tokens=100, temperature=0.8, stop_at_eos=True):
+    def complete(self, prompt, max_new_tokens=100, temperature=0.8, stop_at_eos=True, system_prompt=None):
         """Generate text completion
 
         Args:
-            prompt: Input text to complete
+            prompt: Input text to complete (plain text or conversation messages)
             max_new_tokens: Maximum number of NEW tokens to generate (not including prompt)
             temperature: Sampling temperature (higher = more random)
             stop_at_eos: If True, stop generation at EOS token (recommended for chat models)
+            system_prompt: Optional system prompt (for instruction-tuned models). If not provided,
+                          uses the system prompt from training if available.
         """
-        inputs = self.tokenizer(prompt, return_tensors="pt")
+        # Auto-detect if this is a chat model and format accordingly
+        if hasattr(self.tokenizer, 'chat_template') and self.tokenizer.chat_template:
+            # Format as chat if we have a chat template
+            messages = []
+
+            # Add system prompt if available
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            elif hasattr(self, '_training_system_prompt') and self._training_system_prompt:
+                messages.append({"role": "system", "content": self._training_system_prompt})
+
+            # Add user message
+            messages.append({"role": "user", "content": prompt})
+
+            # Format using chat template and add generation prompt
+            formatted_prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+
+            inputs = self.tokenizer(formatted_prompt, return_tensors="pt")
+        else:
+            # Plain text completion
+            inputs = self.tokenizer(prompt, return_tensors="pt")
 
         if torch.cuda.is_available():
             inputs = {k: v.cuda() for k, v in inputs.items()}
@@ -329,7 +355,14 @@ class HFModel:
         with torch.no_grad():
             outputs = self.model.generate(**inputs, **gen_kwargs)
 
-        return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        result = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+        # If we formatted as chat, extract just the assistant response
+        if hasattr(self.tokenizer, 'chat_template') and self.tokenizer.chat_template:
+            # Remove the prompt part to return only the generated response
+            result = result[len(formatted_prompt):].strip()
+
+        return result
 
     def save_adapter(self, path):
         """Save only the LoRA adapter weights (lightweight)"""
@@ -1153,6 +1186,17 @@ class Kit:
 
         # Assign trainer to model
         hf_model.trainer = trainer
+
+        # Try to extract system prompt from the dataset for use during inference
+        hf_model._training_system_prompt = None
+        if hasattr(dataset, 'raw') and len(dataset.raw) > 0:
+            first_example = dataset.raw[0]
+            if 'messages' in first_example:
+                # Conversational format - look for system message
+                for msg in first_example['messages']:
+                    if msg.get('role') == 'system':
+                        hf_model._training_system_prompt = msg.get('content')
+                        break
 
         print("\n✓ LoRA fine-tuning configured successfully")
         print("  Next step: Call model.train() to start fine-tuning\n")
