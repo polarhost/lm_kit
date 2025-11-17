@@ -743,7 +743,7 @@ class Kit:
 
     def lora_tune(self, hf_model, dataset, lora_preset="medium", learning_rate=2e-4,
                   steps=1000, batch_size=4, gradient_accumulation_steps=4,
-                  max_length=512, output_dir="./lora_output"):
+                  max_length=512, output_dir="./lora_output", response_template=None):
         """
         Configure LoRA fine-tuning for a HuggingFace model.
 
@@ -876,19 +876,23 @@ class Kit:
 
         # Data collator - use response masking for instruction tuning
         # This ensures we only train on the assistant's responses, not the prompts
-        try:
-            from trl import DataCollatorForCompletionOnly
+        from trl import DataCollatorForCompletionOnly
 
-            # For conversational format, we need to identify where responses start
-            # Most chat templates use specific tokens or patterns
-            response_template = None
+        # For conversational format, we need to identify where responses start
+        # Most chat templates use specific tokens or patterns
+        detected_template = None
 
+        # Manual override takes precedence
+        if response_template:
+            detected_template = response_template
+            print(f"✓ Using manual response template: '{response_template}'")
+        else:
             # Try to detect the response template based on tokenizer chat template
             if hasattr(hf_model.tokenizer, 'chat_template') and hf_model.tokenizer.chat_template:
                 # Common patterns in chat templates
                 if 'assistant' in hf_model.tokenizer.chat_template.lower():
                     # Try common assistant markers
-                    for marker in ['<|assistant|>', 'assistant\n', '[/INST]', '<|im_start|>assistant']:
+                    for marker in ['<|assistant|>', 'assistant\n', '[/INST]', '<|im_start|>assistant', '<|start_header_id|>assistant<|end_header_id|>']:
                         test_messages = [
                             {"role": "user", "content": "test"},
                             {"role": "assistant", "content": "response"}
@@ -897,26 +901,41 @@ class Kit:
                             test_messages, tokenize=False, add_generation_prompt=False
                         )
                         if marker in formatted:
-                            response_template = marker
+                            detected_template = marker
+                            print(f"✓ Auto-detected response template: '{marker}'")
                             break
 
-            if response_template:
-                print(f"✓ Using response masking with template: '{response_template}'")
-                data_collator = DataCollatorForCompletionOnly(
-                    response_template=response_template,
-                    tokenizer=hf_model.tokenizer,
-                    mlm=False
-                )
-            else:
-                print("⚠ Could not detect response template, training on full sequence")
-                print("  This may reduce training effectiveness for instruction tuning")
-                data_collator = DataCollatorForLanguageModeling(
-                    tokenizer=hf_model.tokenizer,
-                    mlm=False
-                )
-        except ImportError:
-            print("⚠ TRL library not available, using standard data collator")
-            print("  Consider installing TRL for better instruction tuning: pip install trl")
+            # Fallback: check if using our simple fallback format
+            if not detected_template:
+                # Test if the tokenizer uses our fallback format
+                test_messages = [
+                    {"role": "user", "content": "test"},
+                    {"role": "assistant", "content": "response"}
+                ]
+                try:
+                    formatted = hf_model.tokenizer.apply_chat_template(
+                        test_messages, tokenize=False, add_generation_prompt=False
+                    )
+                except:
+                    # No chat template - using our fallback in format_chat_template
+                    formatted = "User: test\n\nAssistant: response"
+
+                # Check for our fallback format
+                if "Assistant:" in formatted:
+                    detected_template = "Assistant:"
+                    print(f"✓ Using fallback response template: 'Assistant:'")
+
+        if detected_template:
+            print(f"  Response masking enabled - only training on assistant responses")
+            data_collator = DataCollatorForCompletionOnly(
+                response_template=detected_template,
+                tokenizer=hf_model.tokenizer,
+                mlm=False
+            )
+        else:
+            print("⚠ Could not detect response template, training on full sequence")
+            print("  WARNING: This will train on both prompts and responses")
+            print("  Consider specifying response_template parameter manually")
             data_collator = DataCollatorForLanguageModeling(
                 tokenizer=hf_model.tokenizer,
                 mlm=False
