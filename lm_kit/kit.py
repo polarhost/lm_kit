@@ -927,6 +927,52 @@ class Kit:
 
         if detected_template:
             print(f"  Response masking enabled - only training on assistant responses")
+
+            # Diagnostic: Show what the template looks like in the formatted text
+            print(f"\n{'='*70}")
+            print("DIAGNOSTIC: Response Template Detection")
+            print(f"{'='*70}")
+
+            # Create a sample formatted message to show the template
+            sample_messages = [
+                {"role": "user", "content": "What is programming?"},
+                {"role": "assistant", "content": "It be the art of instructin' machines."}
+            ]
+
+            from .lora_utils import format_chat_template
+            sample_formatted = format_chat_template(sample_messages, hf_model.tokenizer)
+            print(f"Sample formatted conversation:")
+            print(f"---")
+            print(sample_formatted)
+            print(f"---")
+            print(f"\nResponse template marker: '{detected_template}'")
+            print(f"Template found in sample: {detected_template in sample_formatted}")
+
+            # Show token IDs for the template
+            template_tokens = hf_model.tokenizer.encode(detected_template, add_special_tokens=False)
+            print(f"Template token IDs: {template_tokens}")
+
+            # Tokenize a sample and show which tokens would be masked
+            sample_tokenized = hf_model.tokenizer(sample_formatted, return_tensors="pt")
+            print(f"\nSample sequence length: {sample_tokenized['input_ids'].shape[1]} tokens")
+
+            # Try to find where the template appears in the tokenized sequence
+            full_ids = sample_tokenized['input_ids'][0].tolist()
+            template_positions = []
+            for i in range(len(full_ids) - len(template_tokens) + 1):
+                if full_ids[i:i+len(template_tokens)] == template_tokens:
+                    template_positions.append(i)
+
+            if template_positions:
+                print(f"Template found at token positions: {template_positions}")
+                print(f"This means tokens {template_positions[0]}+ will be trained on (assistant response)")
+            else:
+                print(f"⚠ WARNING: Template NOT found in tokenized sequence!")
+                print(f"  This means response masking will NOT work correctly")
+                print(f"  Full token IDs: {full_ids[:50]}... (showing first 50)")
+
+            print(f"{'='*70}\n")
+
             data_collator = DataCollatorForCompletionOnly(
                 response_template=detected_template,
                 tokenizer=hf_model.tokenizer,
