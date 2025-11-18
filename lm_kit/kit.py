@@ -182,7 +182,6 @@ class Dataset:
         gpu = detect_gpu()
         
         print(f"\nDataset Analysis")
-        print("-" * 50)
         print(f"Examples: {len(self.raw):,}")
         print(f"Total tokens: ~{self.total_tokens/1e6:.0f}M")
         print(f"Recommended context length: {self.context_length}")
@@ -224,15 +223,12 @@ class Model:
 
     def train(self):
         """Train the model"""
-        print("=" * 70)
-        print("STARTING TRAINING")
-        print("=" * 70)
+        print("Starting training")
 
         result = self.trainer.train()
 
-        print("\n" + "=" * 70)
-        print("TRAINING COMPLETE!")
-        print("=" * 70)
+        print("\n")
+        print("Training complete.")
         print(f"Final loss: {result.training_loss:.4f}\n")
 
         self.model.eval()
@@ -282,21 +278,17 @@ class HFModel:
         if self.trainer is None:
             raise ValueError("No trainer configured. Call kit.lora_tune() first.")
 
-        print("=" * 70)
-        print("STARTING LORA FINE-TUNING")
-        print("=" * 70)
+        print("Starting LoRA fine-tuning.")
 
         result = self.trainer.train()
 
-        print("\n" + "=" * 70)
-        print("LORA FINE-TUNING COMPLETE!")
-        print("=" * 70)
+        print("Completed fine-tuning.")
         print(f"Final loss: {result.training_loss:.4f}\n")
 
         self.model.eval()
         return self
 
-    def complete(self, prompt, max_new_tokens=100, temperature=0.8, stop_at_eos=True, system_prompt=None):
+    def complete(self, prompt, max_new_tokens=100, temperature=0.8,system_prompt=None, top_k=50, top_p=0.95, repetition_penalty=1.2, stop_at_eos=True):
         """Generate text completion
 
         Args:
@@ -307,21 +299,16 @@ class HFModel:
             system_prompt: Optional system prompt (for instruction-tuned models). If not provided,
                           uses the system prompt from training if available.
         """
-        # Auto-detect if this is a chat model and format accordingly
         if hasattr(self.tokenizer, 'chat_template') and self.tokenizer.chat_template:
-            # Format as chat if we have a chat template
             messages = []
 
-            # Add system prompt if available
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
             elif hasattr(self, '_training_system_prompt') and self._training_system_prompt:
                 messages.append({"role": "system", "content": self._training_system_prompt})
 
-            # Add user message
             messages.append({"role": "user", "content": prompt})
 
-            # Format using chat template and add generation prompt
             formatted_prompt = self.tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
@@ -330,20 +317,18 @@ class HFModel:
 
             inputs = self.tokenizer(formatted_prompt, return_tensors="pt")
         else:
-            # Plain text completion
             inputs = self.tokenizer(prompt, return_tensors="pt")
 
         if torch.cuda.is_available():
             inputs = {k: v.cuda() for k, v in inputs.items()}
 
-        # Build generation kwargs
         gen_kwargs = {
             "max_new_tokens": max_new_tokens,
             "temperature": temperature,
             "do_sample": True,
-            "top_k": 50,
-            "top_p": 0.95,
-            "repetition_penalty": 1.2,
+            "top_k": top_k,
+            "top_p": top_p,
+            "repetition_penalty": repetition_penalty,
             "pad_token_id": self.tokenizer.eos_token_id,
         }
 
@@ -388,8 +373,7 @@ class HFModel:
 
         merged_model.save_pretrained(path)
         self.tokenizer.save_pretrained(path)
-        print(f"✓ Merged model saved to {path}")
-        print(f"  (Full model, can be loaded without LoRA)")
+        print(f" Merged model saved to {path}. Full model, can be loaded without LoRA.")
 
     def load_adapter(self, adapter_path):
         """Load a LoRA adapter onto this model"""
@@ -398,7 +382,7 @@ class HFModel:
         print(f"Loading LoRA adapter from {adapter_path}...")
         self.model = PeftModel.from_pretrained(self.model, adapter_path)
         self.is_lora_enabled = True
-        print("✓ LoRA adapter loaded successfully\n")
+        print("LoRA adapter loaded successfully\n")
 
 
 class Kit:
@@ -421,14 +405,13 @@ class Kit:
         self.tokenizer_mode = mode
         
         print(f"\nTokenizer mode set to: '{mode}'")
-        print("-" * 50)
         
         if mode == "standard":
             print("Vocabulary: 50,257 tokens (GPT-2)")
             print("Impact on 10M model: ~13M params in embeddings (56%)")
             print("Impact on 30M model: ~19M params in embeddings (47%)")
             print("Impact on 100M model: ~26M params in embeddings (26%)")
-            print("\nBest for: General use, broad vocabulary needs")
+            print("\nBest for general use, broad vocabulary needs")
             
         elif mode == "small":
             print("Vocabulary: 16,384 tokens (custom trained)")
@@ -436,7 +419,7 @@ class Kit:
             print("Impact on 30M model: ~6M params in embeddings (20%)")
             print("Impact on 100M model: ~8M params in embeddings (8%)")
             print("\nNote: Tokenizer will be trained on your dataset (1-2 min)")
-            print("Best for: Smaller models, domain-specific text")
+            print("Best for smaller models, domain-specific text")
         
         print()
         return self
@@ -508,7 +491,6 @@ class Kit:
         model_params = num_params - (vocab_params * 2)
         
         print(f"Creating {model_size} model")
-        print("-" * 50)
         print(f"Total parameters: {num_params:,} ({num_params/1e6:.1f}M)")
         print(f"  Vocabulary: {vocab_params*2:,} ({vocab_params*2/1e6:.1f}M)")
         print(f"  Model layers: {model_params:,} ({model_params/1e6:.1f}M)")
@@ -519,7 +501,6 @@ class Kit:
         print(f"  Context length: {config.n_positions}")
         print(f"  Vocabulary size: {vocab_size:,}\n")
         
-        # Get GPU-specific batch config
         gpu = detect_gpu()
         batch_config = BATCH_CONFIGS[gpu][model_size]
         
@@ -532,8 +513,7 @@ class Kit:
             dataset.context_length
         )
         
-        print(f"Training Configuration")
-        print("-" * 50)
+        print(f"Training configuration")
         print(f"Batch size: {batch_config['batch_size']}")
         print(f"Gradient accumulation: {batch_config['grad_accum']}")
         print(f"Effective batch size: {batch_config['batch_size'] * batch_config['grad_accum']}")
@@ -541,10 +521,8 @@ class Kit:
         print(f"Warmup steps: {steps // 20}")
         print(f"Learning rate: {config_dict['learning_rate']}\n")
         
-        # Tokenize dataset
         tokenized_dataset = dataset.tokenize(dataset.context_length)
         
-        # Setup training
         training_args = TrainingArguments(
             output_dir=f"./lm_kit_{model_size}",
             overwrite_output_dir=True,
@@ -599,7 +577,7 @@ class Kit:
         import re
         from transformers import AutoTokenizer
 
-        # Determine if path is a URL or local path using regex
+        # Determine if path is a URL or local path
         url_pattern = re.compile(
             r'^(https?://|s3://|gs://|[a-zA-Z0-9]+://)',
             re.IGNORECASE
@@ -611,15 +589,13 @@ class Kit:
             print("(Downloading from cloud storage...)")
         else:
             print(f"Loading model from disk: {path}")
-            # Validate local path exists
             if not os.path.exists(path):
                 raise ValueError(f"Model path does not exist: {path}")
 
-        print("-" * 50)
 
         try:
             model = GPT2LMHeadModel.from_pretrained(path)
-            print("✓ Model loaded successfully")
+            print("Model loaded successfully.")
         except Exception as e:
             if is_url:
                 raise ValueError(f"Failed to load model from URL {path}: {str(e)}\n"
@@ -633,7 +609,7 @@ class Kit:
             # Ensure pad_token is set (should be saved in config, but set as fallback)
             if tokenizer.pad_token is None:
                 tokenizer.pad_token = tokenizer.eos_token
-            print("✓ Tokenizer loaded successfully")
+            print("Tokenizer loaded successfully.")
         except Exception as e:
             if is_url:
                 raise ValueError(f"Failed to load tokenizer from URL {path}: {str(e)}")
@@ -659,8 +635,7 @@ class Kit:
         # Get model info
         num_params = sum(p.numel() for p in model.parameters())
 
-        print(f"\nModel Information")
-        print("-" * 50)
+        print(f"\nModel info")
         print(f"Model size: {model_size}")
         print(f"Total parameters: {num_params:,} ({num_params/1e6:.1f}M)")
         print(f"Architecture:")
@@ -673,16 +648,15 @@ class Kit:
         # Move to GPU if available
         if torch.cuda.is_available():
             model = model.cuda()
-            print(f"\n✓ Model moved to GPU: {torch.cuda.get_device_name(0)}")
+            print(f"\n Model moved to GPU: {torch.cuda.get_device_name(0)}")
         else:
-            print("\n⚠ No GPU detected - inference will be slower")
+            print("\nNo GPU detected. Inference will be slower")
 
-        # Set to evaluation mode
         model.eval()
 
-        print("\n✓ Model ready for inference\n")
+        print("\nModel ready for inference.\n")
 
-        # Return Model instance (trainer=None since we're not training)
+        # Return Model instance with no trainer since it's not training.
         return Model(model, tokenizer, trainer=None, model_size=model_size)
 
     def load_hf_model(self, model_name, quantization=None, device_map="auto", trust_remote_code=False):
@@ -710,10 +684,6 @@ class Kit:
             # Load without quantization (requires more memory)
             model = kit.load_hf_model("gpt2")
         """
-        print(f"Loading HuggingFace model: {model_name}")
-        print("=" * 70)
-
-        # Setup quantization config if requested
         quant_config = None
         is_quantized = False
 
@@ -738,9 +708,7 @@ class Kit:
             print("Quantization: None (full precision)")
 
         print(f"Device mapping: {device_map}")
-        print()
 
-        # Load tokenizer
         try:
             print("Loading tokenizer...")
             tokenizer = AutoTokenizer.from_pretrained(
@@ -752,13 +720,13 @@ class Kit:
             if tokenizer.pad_token is None:
                 tokenizer.pad_token = tokenizer.eos_token
 
-            print("✓ Tokenizer loaded successfully")
+            print("Tokenizer loaded successfully")
         except Exception as e:
             raise ValueError(f"Failed to load tokenizer for '{model_name}': {str(e)}")
 
         # Load model
         try:
-            print("Loading model (this may take a few minutes)...")
+            print("Loading model (this may take a few minutes).")
 
             model = AutoModelForCausalLM.from_pretrained(
                 model_name,
@@ -768,7 +736,7 @@ class Kit:
                 torch_dtype=torch.float16 if not is_quantized else None,
             )
 
-            print("✓ Model loaded successfully")
+            print("Model loaded successfully.")
         except Exception as e:
             raise ValueError(f"Failed to load model '{model_name}': {str(e)}\n"
                            f"Make sure the model name is correct and you have access to it.")
@@ -778,7 +746,6 @@ class Kit:
         memory_stats = get_memory_footprint(model)
 
         print(f"\nModel Information")
-        print("-" * 70)
         print(f"Model: {model_name}")
         print(f"Architecture: {model.config.model_type}")
         print(f"Total parameters: {num_params:,} ({num_params/1e6:.1f}M)")
@@ -788,11 +755,9 @@ class Kit:
         print(f"\nMemory footprint: ~{memory_stats['model_size_gb']:.2f} GB")
         print(f"Quantized: {memory_stats['quantized']}")
 
-        # Set model to training mode for LoRA
         model.train()
 
-        print("\n✓ Model ready for LoRA fine-tuning")
-        print("  Next step: Use kit.lora_tune(model, dataset) to configure LoRA\n")
+        print("\nModel ready for LoRA fine-tuning.")
 
         return HFModel(
             model=model,
@@ -836,45 +801,37 @@ class Kit:
         if not isinstance(dataset, InstructionDataset):
             raise ValueError("dataset must be an InstructionDataset instance from create_instruction_dataset()")
 
-        print("=" * 70)
-        print("CONFIGURING LORA FINE-TUNING")
-        print("=" * 70)
+        print("Configuring LoRA fine-tuning.")
 
-        # Get LoRA configuration
         if lora_preset not in LORA_PRESETS:
             raise ValueError(f"lora_preset must be one of {list(LORA_PRESETS.keys())}, got '{lora_preset}'")
 
         lora_config_dict = LORA_PRESETS[lora_preset].copy()
 
-        # Auto-detect target modules if not specified
         if lora_config_dict["target_modules"] is None:
             target_modules = detect_lora_target_modules(hf_model.model)
             lora_config_dict["target_modules"] = target_modules
         else:
             target_modules = lora_config_dict["target_modules"]
 
-        print(f"\nLoRA Configuration")
-        print("-" * 70)
+        print(f"\nLoRA configuration")
         print(f"Preset: {lora_preset}")
         print(f"Rank (r): {lora_config_dict['r']}")
         print(f"Alpha: {lora_config_dict['lora_alpha']}")
         print(f"Dropout: {lora_config_dict['lora_dropout']}")
         print(f"Target modules: {target_modules}")
 
-        # Estimate trainable parameters
         lora_stats = estimate_lora_params(
             hf_model.model,
             lora_config_dict['r'],
             target_modules
         )
 
-        print(f"\nParameter Statistics")
-        print("-" * 70)
+        print(f"\nParameter statistics")
         print(f"Total model parameters: {lora_stats['total_params']:,}")
         print(f"LoRA trainable parameters: ~{lora_stats['lora_params']:,}")
         print(f"Trainable: ~{lora_stats['trainable_percentage']:.2f}%")
 
-        # Create LoRA config
         lora_config = LoraConfig(
             r=lora_config_dict['r'],
             lora_alpha=lora_config_dict['lora_alpha'],
@@ -884,13 +841,11 @@ class Kit:
             task_type=TaskType.CAUSAL_LM,
         )
 
-        # Prepare model for training if quantized
         if hf_model.is_quantized:
             print("\nPreparing quantized model for training...")
             hf_model.model = prepare_model_for_kbit_training(hf_model.model)
 
-        # Apply LoRA to model
-        print("Applying LoRA to model...")
+        print("Applying LoRA to model.")
         hf_model.model = get_peft_model(hf_model.model, lora_config)
         hf_model.is_lora_enabled = True
 
@@ -898,16 +853,12 @@ class Kit:
         trainable_params = sum(p.numel() for p in hf_model.model.parameters() if p.requires_grad)
         all_params = sum(p.numel() for p in hf_model.model.parameters())
 
-        print(f"\n✓ LoRA applied successfully")
+        print(f"\nLoRA applied successfully")
         print(f"Actual trainable parameters: {trainable_params:,} ({100 * trainable_params / all_params:.2f}%)")
 
-        # Override chat template if requested
         if use_simple_chat_template:
-            print(f"\n✓ Using simplified chat template (removes bloated system prompts)")
-            # Store original template
             original_template = hf_model.tokenizer.chat_template
 
-            # Set a simple template that doesn't include the massive default system prompt
             simple_template = (
                 "{% for message in messages %}"
                 "{% if message['role'] == 'system' %}"
@@ -922,13 +873,9 @@ class Kit:
             hf_model.tokenizer.chat_template = simple_template
             print(f"  Original template had default system prompt - now using clean template\n")
 
-        # Prepare dataset
-        print(f"Preparing dataset...")
         tokenized_dataset = dataset.prepare_for_training(hf_model.tokenizer, max_length=max_length)
 
-        # Setup training arguments
         print(f"\nTraining Configuration")
-        print("-" * 70)
         print(f"Steps: {steps:,}")
         print(f"Batch size: {batch_size}")
         print(f"Gradient accumulation: {gradient_accumulation_steps}")
@@ -1002,28 +949,22 @@ class Kit:
                     "attention_mask": torch.tensor(padded_attention_masks)
                 }
 
-                # Create labels with -100 for prompt tokens (ignored in loss)
                 labels = batch["input_ids"].clone()
 
-                # Diagnostic counters
+                # Diagnostic counters.
                 templates_found = 0
                 templates_not_found = 0
                 total_tokens = 0
                 masked_tokens = 0
 
-                # For each sequence in the batch
                 for idx in range(labels.shape[0]):
                     sequence = batch["input_ids"][idx].tolist()
 
-                    # Find where the response template starts
                     response_start = None
                     for i in range(len(sequence) - len(self.response_template_ids) + 1):
                         if sequence[i:i+len(self.response_template_ids)] == self.response_template_ids:
-                            # Response starts after the template
                             response_start = i + len(self.response_template_ids)
                             break
-
-                    # Mask everything before the response
                     if response_start is not None:
                         labels[idx, :response_start] = -100
                         templates_found += 1
@@ -1054,7 +995,6 @@ class Kit:
                     print(f"  Templates NOT found: {templates_not_found}/{len(features)}")
                     print(f"  Tokens masked: {masked_tokens}/{total_tokens} ({mask_pct:.1f}%)")
 
-                    # Show a sample on first batch
                     if self._show_sample and len(features) > 0:
                         print(f"\n  Sample from first sequence:")
                         sample_ids = batch["input_ids"][0].tolist()
@@ -1064,8 +1004,8 @@ class Kit:
                         masked_part = [token_id for token_id, label in zip(sample_ids, sample_labels) if label == -100]
                         unmasked_part = [token_id for token_id, label in zip(sample_ids, sample_labels) if label != -100]
 
-                        print(f"  MASKED (not trained): {self.tokenizer.decode(masked_part)[:200]}")
-                        print(f"  UNMASKED (trained): {self.tokenizer.decode(unmasked_part)[:200]}")
+                        #print(f"  MASKED (not trained): {self.tokenizer.decode(masked_part)[:200]}")
+                        #print(f"  UNMASKED (trained): {self.tokenizer.decode(unmasked_part)[:200]}")
                         self._show_sample = False
 
                 batch["labels"] = labels
@@ -1078,13 +1018,9 @@ class Kit:
         # Manual override takes precedence
         if response_template:
             detected_template = response_template
-            print(f"✓ Using manual response template: '{response_template}'")
         else:
-            # Try to detect the response template based on tokenizer chat template
             if hasattr(hf_model.tokenizer, 'chat_template') and hf_model.tokenizer.chat_template:
-                # Common patterns in chat templates
                 if 'assistant' in hf_model.tokenizer.chat_template.lower():
-                    # Try common assistant markers
                     for marker in ['<|assistant|>', 'assistant\n', '[/INST]', '<|im_start|>assistant', '<|start_header_id|>assistant<|end_header_id|>']:
                         test_messages = [
                             {"role": "user", "content": "test"},
@@ -1095,12 +1031,10 @@ class Kit:
                         )
                         if marker in formatted:
                             detected_template = marker
-                            print(f"✓ Auto-detected response template: '{marker}'")
                             break
 
-            # Fallback: check if using our simple fallback format
+            # Fallback.
             if not detected_template:
-                # Test if the tokenizer uses our fallback format
                 test_messages = [
                     {"role": "user", "content": "test"},
                     {"role": "assistant", "content": "response"}
@@ -1110,22 +1044,12 @@ class Kit:
                         test_messages, tokenize=False, add_generation_prompt=False
                     )
                 except:
-                    # No chat template - using our fallback in format_chat_template
                     formatted = "User: test\n\nAssistant: response"
 
-                # Check for our fallback format
                 if "Assistant:" in formatted:
                     detected_template = "Assistant:"
-                    print(f"✓ Using fallback response template: 'Assistant:'")
 
         if detected_template:
-            print(f"  Response masking enabled - only training on assistant responses")
-
-            # Diagnostic: Show what the template looks like in the formatted text
-            print(f"\n{'='*70}")
-            print("DIAGNOSTIC: Response Template Detection")
-            print(f"{'='*70}")
-
             # Create a sample formatted message to show the template
             sample_messages = [
                 {"role": "user", "content": "What is programming?"},
@@ -1134,20 +1058,12 @@ class Kit:
 
             from .lora_utils import format_chat_template
             sample_formatted = format_chat_template(sample_messages, hf_model.tokenizer)
-            print(f"Sample formatted conversation:")
-            print(f"---")
-            print(sample_formatted)
-            print(f"---")
-            print(f"\nResponse template marker: '{detected_template}'")
-            print(f"Template found in sample: {detected_template in sample_formatted}")
 
             # Show token IDs for the template
             template_tokens = hf_model.tokenizer.encode(detected_template, add_special_tokens=False)
-            print(f"Template token IDs: {template_tokens}")
 
             # Tokenize a sample and show which tokens would be masked
             sample_tokenized = hf_model.tokenizer(sample_formatted, return_tensors="pt")
-            print(f"\nSample sequence length: {sample_tokenized['input_ids'].shape[1]} tokens")
 
             # Try to find where the template appears in the tokenized sequence
             full_ids = sample_tokenized['input_ids'][0].tolist()
@@ -1156,15 +1072,9 @@ class Kit:
                 if full_ids[i:i+len(template_tokens)] == template_tokens:
                     template_positions.append(i)
 
-            if template_positions:
-                print(f"Template found at token positions: {template_positions}")
-                print(f"This means tokens {template_positions[0]}+ will be trained on (assistant response)")
-            else:
-                print(f"⚠ WARNING: Template NOT found in tokenized sequence!")
-                print(f"  This means response masking will NOT work correctly")
-                print(f"  Full token IDs: {full_ids[:50]}... (showing first 50)")
-
-            print(f"{'='*70}\n")
+            if not template_positions:
+                print(f"Template not found in tokenized sequence. Response masking will fail.")
+                print(f"  Full token IDs: {full_ids[:50]}. (showing first 50)")
 
             data_collator = ResponseMaskingDataCollator(
                 tokenizer=hf_model.tokenizer,
@@ -1172,13 +1082,12 @@ class Kit:
                 mlm=False
             )
         else:
-            print("⚠ Could not detect response template, training on full sequence")
-            print("  WARNING: This will train on both prompts and responses")
-            print("  Consider specifying response_template parameter manually")
-            data_collator = DataCollatorForLanguageModeling(
-                tokenizer=hf_model.tokenizer,
-                mlm=False
-            )
+            print("Could not detect response template. Failed.")
+            return
+            #data_collator = DataCollatorForLanguageModeling(
+            #    tokenizer=hf_model.tokenizer,
+            #    mlm=False
+            #)
 
         # Create trainer
         trainer = Trainer(
@@ -1202,9 +1111,7 @@ class Kit:
                         hf_model._training_system_prompt = msg.get('content')
                         break
 
-        print("\n✓ LoRA fine-tuning configured successfully")
-        print("  Next step: Call model.train() to start fine-tuning\n")
-
+        print("\nLoRA fine-tuning configured successfully.")
         return hf_model
 
     def encode_twoway_to_lora(self, text_or_file, input_marker="Q:", output_marker="A:",
@@ -1362,13 +1269,9 @@ class Kit:
         else:
             raise ValueError(f"format_type must be 'conversational' or 'completion', got '{format_type}'")
 
-        print(f"✓ Encoded {len(formatted_data):,} question-answer pairs")
-        print(f"  Input marker: '{input_marker}'")
-        print(f"  Output marker: '{output_marker}'")
-        print(f"  Format: {format_type}")
+        print(f"Encoded {len(formatted_data):,} question-answer pairs")
         if system_prompt:
             print(f"  System prompt: '{system_prompt}'")
-        print()
 
         return formatted_data
 
@@ -1409,7 +1312,6 @@ class Kit:
             ], format_type="completion")
         """
         print(f"Creating instruction dataset ({format_type} format)")
-        print(f"Examples: {len(data):,}\n")
 
         return InstructionDataset(data, format_type=format_type)
 
@@ -1443,8 +1345,7 @@ class Kit:
         model = GPT2LMHeadModel(config)
         num_params = sum(p.numel() for p in model.parameters())
         
-        print(f"Model Configuration")
-        print("-" * 50)
+        print(f"Model configuration")
         print(f"Parameters: {num_params:,} ({num_params/1e6:.2f}M)")
         print(f"Layers: 2")
         print(f"Embedding dim: 64")
@@ -1491,11 +1392,11 @@ class Kit:
         
         if torch.cuda.is_available():
             model = model.cuda()
-            print(f"✓ GPU detected: {torch.cuda.get_device_name(0)}")
+            print(f"GPU detected: {torch.cuda.get_device_name(0)}")
         else:
-            print("⚠ No GPU detected - will be slow")
+            print("No GPU detected. Will be slow.")
         
-        print("\nStarting training test...\n")
+        print("\nStarting training test.\n")
         
         trainer.train()
         
@@ -1508,9 +1409,7 @@ class Kit:
                 self.model = model
                 self.tokenizer = tokenizer
             
-            def complete(self, prompt):
-                """Generate text"""
-                print("Testing text completion:")
+            def complete(self, prompt, temperature=0.8, top_k=50, max_length=50):
                 
                 inputs = self.tokenizer(prompt, return_tensors="pt")
                 
@@ -1520,10 +1419,10 @@ class Kit:
                 with torch.no_grad():
                     outputs = self.model.generate(
                         **inputs,
-                        max_length=50,
-                        temperature=0.8,
+                        max_length=max_length,
+                        temperature=temperature,
                         do_sample=True,
-                        top_k=50,
+                        top_k=top_k,
                         pad_token_id=self.tokenizer.eos_token_id,
                     )
                 
@@ -1531,7 +1430,7 @@ class Kit:
                 
                 print(f"Prompt: '{prompt}'")
                 print(f"Output: '{result}'\n")
-                print("Generation works!")
+                print("Generation works.")
                 
                 return result
             
